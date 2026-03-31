@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      width: 220px;
+      background: #0d0f12;
+      color: #c8cdd6;
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 11px;
+      border: 1px solid #2a2e36;
+    }
+
+    .header {
+      padding: 10px 12px 8px;
+      border-bottom: 1px solid #2a2e36;
+      background: #13161b;
+    }
+
+    .header h1 {
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.14em;
+      color: #f0c040;
+      text-transform: uppercase;
+    }
+
+    .header p {
+      font-size: 9px;
+      color: #444;
+      margin-top: 3px;
+      letter-spacing: 0.04em;
+    }
+
+    .body { padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+
+    button {
+      width: 100%;
+      background: #13161b;
+      border: 1px solid #2a2e36;
+      color: #c8cdd6;
+      padding: 7px 10px;
+      border-radius: 3px;
+      font-family: inherit;
+      font-size: 10px;
+      cursor: pointer;
+      text-align: left;
+      letter-spacing: 0.06em;
+      transition: border-color 0.15s, color 0.15s;
+    }
+
+    button:hover { border-color: #f0c040; color: #f0c040; }
+
+    button.primary {
+      background: #f0c040;
+      color: #0d0f12;
+      font-weight: 600;
+      border-color: #f0c040;
+    }
+
+    button.primary:hover { opacity: 0.88; color: #0d0f12; }
+
+    #status {
+      font-size: 9px;
+      color: #444;
+      padding: 4px 0;
+      min-height: 14px;
+      letter-spacing: 0.04em;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>⬡ Artifact Sorter</h1>
+    <p>claude.ai file panel controller</p>
+  </div>
+  <div class="body">
+    <button class="primary" id="btn-open">Open sort panel</button>
+    <button id="btn-scan">Scan + dump to console</button>
+    <div id="status">—</div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
