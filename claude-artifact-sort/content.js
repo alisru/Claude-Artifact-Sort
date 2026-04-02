@@ -82,29 +82,11 @@
 
     const scope = container || document;
     return Array.from(scope.querySelectorAll('[role="button"][aria-label$=". Open artifact."]'))
-      .map(node => {
-        const nameEl = node.querySelector('.leading-tight, [class*="leading-tight"]');
-        const typeEl = node.querySelector('[class*="text-text-400"]');
-        let type = null;
-        if (typeEl) {
-          const m = typeEl.textContent.match(/\b([A-Z]{2,5})\s*$/);
-          if (m) type = m[1];
-        }
-        const ariaLabel = node.getAttribute('aria-label') || '';
-        const name = nameEl
-          ? nameEl.textContent.trim()
-          : ariaLabel.replace(/\. Open artifact\.$/, '').trim();
-        return {
-          node, score: 15, source: 'generated',
-          data: {
-            name: name || null, type,
-            date: null, size: null, id: null,
-            allAttributes: Object.fromEntries(Array.from(node.attributes).map(a => [a.name, a.value])),
-            allDataAttributes: {},
-            rawText: name, tagName: node.tagName, classes: safeClassName(node),
-          }
-        };
-      })
+      .map(node => ({
+        node,
+        source: 'generated',
+        data: extractNodeData(node),
+      }))
       .filter(i => i.data.name);
   }
 
@@ -331,7 +313,7 @@
   function sidebarBtnStyle(active) {
     return [
       'background:none','border:1px solid #2a2e36',
-      'color:#555','padding:2px 7px','border-radius:3px',
+      'color:#888','padding:2px 7px','border-radius:3px',
       'font-family:monospace','font-size:9px','cursor:pointer',
       'transition:color 0.15s,border-color 0.15s',
     ].join(';');
@@ -354,6 +336,15 @@
       seenNames.add(i.data.name);
       seenNodes.add(i.node);
       return true;
+    });
+
+    // Assign permanent session-based original index if missing
+    all.forEach((item, idx) => {
+      const p = item.node.parentElement;
+      if (p && !p.hasAttribute('data-cas-orig-index')) {
+        p.setAttribute('data-cas-orig-index', idx);
+        item.origIndex = idx;
+      }
     });
 
     recordFirstSeen(all);
@@ -416,6 +407,7 @@
       rawText: (node.textContent || '').trim().slice(0, 200),
       tagName: node.tagName,
       classes: safeClassName(node),
+      origIndex: parseInt(node.parentElement?.getAttribute('data-cas-orig-index') || '999999'),
     };
 
     // All attributes
@@ -433,17 +425,17 @@
 
     // Try to extract a file name
     // Priority: aria-label > testid > text content with extension > first short text child
-    if (data.ariaLabel && /\.\w{2,5}$/.test(data.ariaLabel)) {
-      data.name = data.ariaLabel;
-    } else if (data.testId && /\.\w{2,5}$/.test(data.testId)) {
-      data.name = data.testId;
+    if (data.ariaLabel && (/\.\w{2,5}$/.test(data.ariaLabel.trim()) || data.ariaLabel.toLowerCase().includes('artifact'))) {
+      data.name = data.ariaLabel.trim().replace(/\. Open artifact\.$/i, '').replace(/\. View artifact\.$/i, '');
+    } else if (data.testId && (/\.\w{2,5}$/.test(data.testId.trim()) || data.testId.toLowerCase().includes('artifact'))) {
+      data.name = data.testId.trim().replace(/\. Open artifact\.$/i, '').replace(/\. View artifact\.$/i, '');
     } else {
       // Walk child text nodes for something that looks like a filename
       const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
       let textNode;
       while ((textNode = walker.nextNode())) {
         const t = textNode.textContent.trim();
-        if (t.length > 0 && t.length < 120 && /\.\w{2,5}$/.test(t)) {
+        if (t.length > 0 && t.length < 120 && (/\.\w{2,5}$/.test(t) || t.toLowerCase().includes('artifact'))) {
           data.name = t;
           break;
         }
@@ -453,6 +445,9 @@
         data.name = data.rawText;
       }
     }
+
+    // SLUG for robust matching (e.g. Marx ideology problem -> marx_ideology_problem)
+    data.slug = toSlug(data.name);
 
     // Try to extract file type from name or explicit attribute
     if (data.name) {
@@ -482,6 +477,17 @@
       || null;
 
     return data;
+  }
+
+  function toSlug(s) {
+    if (!s) return '';
+    return s.toLowerCase()
+      .trim()
+      .replace(/\.open artifact\.$/i, '')
+      .replace(/\.view artifact\.$/i, '')
+      .replace(/\.\w{2,5}$/, '') // remove extension
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '');
   }
 
   function extractSizeFromText(text) {
@@ -528,6 +534,8 @@
         sorted.sort((a, b) => (b.data.name || '').localeCompare(a.data.name || ''));
         break;
       case 'dom-order':
+        sorted.sort((a, b) => (a.origIndex || 0) - (b.origIndex || 0));
+        break;
       default:
         break;
     }
@@ -535,7 +543,7 @@
   }
 
   function applySort(items, mode) {
-    if (mode === 'dom-order' || items.length < 2) return;
+    if (items.length < 2) return;
 
     const groups = { upload: [], generated: [], project: [], unknown: [] };
     items.forEach(item => groups[item.source || 'unknown'].push(item));
@@ -577,6 +585,7 @@
         <div id="cas-tabs">
           <button class="cas-tab cas-tab-active" data-tab="chat">This chat</button>
           <button class="cas-tab" data-tab="project">Project</button>
+          <button class="cas-tab" data-tab="settings">⚙</button>
         </div>
         <div id="cas-tab-chat">
         <div id="cas-sort-row">
@@ -613,6 +622,19 @@
         <div id="cas-tab-project" style="display:none">
           <div id="cas-project-list"></div>
         </div>
+        <div id="cas-tab-settings" style="display:none; padding:10px 4px;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
+            <label style="color:#888; font-size:10px;">UI Scale (Zoom)</label>
+            <div style="display:flex; gap:4px; align-items:center;">
+              <button id="cas-btn-zoom-dec" style="background:#13161b; border:1px solid #2a2e36; color:#ccc; border-radius:3px; width:22px; height:22px; cursor:pointer;">-</button>
+              <input type="text" id="cas-inp-zoom" value="100%" style="width:40px; text-align:center; background:#0a0c0f; color:#f0c040; border:1px solid #2a2e36; border-radius:3px; outline:none; font-family:monospace; font-size:10px; padding:2px;" readonly />
+              <button id="cas-btn-zoom-inc" style="background:#13161b; border:1px solid #2a2e36; color:#ccc; border-radius:3px; width:22px; height:22px; cursor:pointer;">+</button>
+            </div>
+          </div>
+          <div style="margin-top:20px;">
+            <button id="cas-btn-reset-settings" style="width:100%; padding:6px; background:rgba(211,47,47,0.1); border:1px solid #d32f2f; color:#d32f2f; border-radius:3px; cursor:pointer; font-size:10px; letter-spacing:0.05em;">Reset to Defaults</button>
+          </div>
+        </div>
       </div>
     `;
 
@@ -626,12 +648,12 @@
 
   function bindPanelEvents(panel) {
     let collapsed = false;
-
     const body = document.getElementById('cas-body');
     const status = document.getElementById('cas-status');
     const list = document.getElementById('cas-list');
     const dataNote = document.getElementById('cas-data-note');
     const dataSummary = document.getElementById('cas-data-summary');
+    let currentItems = [];
 
     document.getElementById('cas-toggle').addEventListener('click', () => {
       collapsed = !collapsed;
@@ -647,25 +669,25 @@
       status.textContent = 'Scanning…';
       list.innerHTML = '';
       requestAnimationFrame(async () => {
-        const items = scanForFileList();
-        renderList(items, list, status, dataNote, dataSummary);
+        currentItems = scanForFileList();
+        renderList(currentItems, list, status, dataNote, dataSummary);
         await refreshSummariseBadge();
       });
     });
 
     document.getElementById('cas-apply').addEventListener('click', () => {
-      let items = scanForFileList();
-      if (items.length === 0) {
+      currentItems = scanForFileList();
+      if (currentItems.length === 0) {
         status.textContent = 'Scan first (↺)';
         return;
       }
       const mode = document.getElementById('cas-sort-mode').value;
-      applySort(items, mode);
+      applySort(currentItems, mode);
       status.textContent = `Sorted: ${mode}`;
       // Rescan after sort
       requestAnimationFrame(() => requestAnimationFrame(async () => {
-        items = scanForFileList();
-        renderList(items, list, status, dataNote, dataSummary);
+        currentItems = scanForFileList();
+        renderList(currentItems, list, status, dataNote, dataSummary);
         await refreshSummariseBadge();
       }));
     });
@@ -719,63 +741,12 @@
 
     // ── ↓ Summarise — fills input AND auto-sends (GAP 2) ──────────────────
     document.getElementById('cas-summarise').addEventListener('click', () => {
-      const artifacts = currentItems.filter(i => i.source === 'generated');
-      if (artifacts.length === 0) { status.textContent = 'Scan first (↺).'; return; }
-      const sentences = document.getElementById('cas-sum-length').value;
-      const lenLabel = sentences === '1' ? '1 sentence' : sentences === '2' ? '2-3 sentences' : '5 sentences';
-      const names = artifacts.map(a => a.data.name).join('\n');
-      const prompt = `For each file below write exactly ${lenLabel} describing what it contains.\nReply with a JSON object only — keys are the exact filenames, values are the summaries. No other text.\n\n${names}`;
-      const input = document.querySelector('[contenteditable="true"][data-testid="composer-input"], .ProseMirror[contenteditable="true"]')
-        || document.querySelector('[contenteditable="true"]');
-      if (!input) { status.textContent = 'Chat input not found.'; return; }
-      input.focus();
-      document.execCommand('selectAll', false, null);
-      document.execCommand('insertText', false, prompt);
-      status.textContent = '↓ Sending prompt — click ↓ Inject after Claude responds.';
-      setTimeout(() => {
-        const sendBtn = document.querySelector('button[aria-label*="Send"], button[data-testid*="send"]');
-        if (sendBtn && !sendBtn.disabled) sendBtn.click();
-      }, 100);
+      performSummarise(status);
     });
 
     // ── ↓ Inject — reads paste field first, then last DOM response (GAPs 2,5) ──
     document.getElementById('cas-inject').addEventListener('click', async () => {
-      const artifacts = currentItems.filter(i => i.source === 'generated');
-      if (artifacts.length === 0) { status.textContent = 'Scan first (↺).'; return; }
-      const pasteField = document.getElementById('cas-paste-json');
-      const pasteText = pasteField ? pasteField.value.trim() : '';
-      let jsonText = pasteText;
-      if (!jsonText) {
-        const responses = document.querySelectorAll('[data-is-streaming="false"] .font-claude-response');
-        if (responses.length === 0) { status.textContent = 'No Claude response found. Paste JSON above or wait for response.'; return; }
-        jsonText = responses[responses.length - 1].textContent.trim();
-      }
-      // Match JSON object (name-keyed, new format) or array (positional fallback)
-      const match = jsonText.match(/\{[\s\S]*\}/) || jsonText.match(/\[[\s\S]*\]/);
-      if (!match) { status.textContent = 'No JSON found — check format.'; return; }
-      try {
-        const parsed = JSON.parse(match[0]);
-        let count = 0;
-        if (Array.isArray(parsed)) {
-          // Positional fallback (old array format)
-          for (let i = 0; i < artifacts.length; i++) {
-            if (parsed[i]) { await injectAndStore(artifacts[i].node, artifacts[i].data.name, parsed[i]); count++; }
-          }
-        } else {
-          // Name-keyed (safe regardless of DOM order)
-          for (const artifact of artifacts) {
-            const summary = parsed[artifact.data.name];
-            if (summary) { await injectAndStore(artifact.node, artifact.data.name, summary); count++; }
-          }
-        }
-        status.textContent = `✓ Injected ${count} summaries (persisted)`;
-        if (pasteField) pasteField.value = '';
-        document.getElementById('cas-new-badge')?.remove();
-        currentItems = scanForFileList();
-        renderList(currentItems, list, status, dataNote, dataSummary);
-      } catch(e) {
-        status.textContent = 'Could not parse JSON — check format.';
-      }
+      performInjection(status);
     });
 
     // Drag to reposition panel
@@ -804,8 +775,42 @@
         const which = tab.getAttribute('data-tab');
         document.getElementById('cas-tab-chat').style.display = which === 'chat' ? 'block' : 'none';
         document.getElementById('cas-tab-project').style.display = which === 'project' ? 'block' : 'none';
+        
+        const settingsTab = document.getElementById('cas-tab-settings');
+        if (settingsTab) settingsTab.style.display = which === 'settings' ? 'block' : 'none';
+
         if (which === 'project') renderProjectView();
       });
+    });
+
+    // ── Settings Logic ───────────────────────────────────────────────────
+    const zoomInp = document.getElementById('cas-inp-zoom');
+    
+    // Attempt to load saved global settings
+    chrome.storage.local.get('cas_global_settings', (res) => {
+        const settings = res.cas_global_settings || { zoom: 1 };
+        if (zoomInp) zoomInp.value = Math.round(settings.zoom * 100) + '%';
+        if (panel) panel.style.zoom = settings.zoom;
+    });
+
+    const saveSettings = (zoom) => {
+        chrome.storage.local.set({ cas_global_settings: { zoom } });
+        if (panel) panel.style.zoom = zoom;
+        if (zoomInp) zoomInp.value = Math.round(zoom * 100) + '%';
+    };
+
+    document.getElementById('cas-btn-zoom-dec')?.addEventListener('click', () => {
+        let current = parseFloat((zoomInp.value || '100').replace('%','')) / 100;
+        if (current > 0.5) saveSettings(current - 0.1);
+    });
+
+    document.getElementById('cas-btn-zoom-inc')?.addEventListener('click', () => {
+        let current = parseFloat((zoomInp.value || '100').replace('%','')) / 100;
+        if (current < 2.0) saveSettings(current + 0.1);
+    });
+
+    document.getElementById('cas-btn-reset-settings')?.addEventListener('click', () => {
+        saveSettings(1);
     });
   }
 
@@ -814,9 +819,17 @@
   function injectSummary(node, text) {
     const existing = node.querySelector('.cas-injected-summary');
     if (existing) existing.remove();
-    const typeEl = node.querySelector('[class*="text-text-400"]');
-    const target = typeEl || node.querySelector('.leading-tight');
-    if (!target) return;
+    
+    // Look for the main text info container (where the filename or display name lives)
+    const target = node.querySelector('.leading-tight') 
+                   || node.querySelector('[class*="line-clamp-1"]')
+                   || node.querySelector('div[class*="text-sm"]')
+                   || node.querySelector('[class*="text-text-400"]');
+                   
+    if (!target) {
+        console.warn('[CAS] Injection target NOT found in artifact card:', node);
+        return;
+    }
     const el = document.createElement('div');
     el.className = 'cas-injected-summary';
     el.textContent = text;
@@ -836,6 +849,127 @@
     await storeSummary(name, text);
   }
 
+  async function performSummarise(statusTarget) {
+    const freshItems = scanForFileList();
+    const artifacts = freshItems.filter(i => i.source === 'generated');
+    if (artifacts.length === 0) {
+      if (statusTarget) statusTarget.textContent = 'Scan first (↺).';
+      return;
+    }
+    const lenSelect = document.getElementById('cas-sum-length');
+    const sentences = lenSelect ? lenSelect.value : '2';
+    const lenLabel = sentences === '1' ? '1 sentence' : sentences === '2' ? '2-3 sentences' : '5 sentences';
+    const names = artifacts.map(a => a.data.name).join('\n');
+    const prompt = `For each file below write exactly ${lenLabel} describing what it contains.\nReply with a JSON object only — keys are the exact filenames, values are the summaries. No other text.\n\n${names}`;
+    
+    const input = document.querySelector('[contenteditable="true"][data-testid="composer-input"], .ProseMirror[contenteditable="true"]')
+      || document.querySelector('[contenteditable="true"]');
+      
+    if (!input) {
+      if (statusTarget) statusTarget.textContent = 'Chat input not found.';
+      return;
+    }
+    
+    input.focus();
+    document.execCommand('selectAll', false, null);
+    document.execCommand('insertText', false, prompt);
+    if (statusTarget) statusTarget.textContent = '↓ Sending prompt — click ↓ Inject after Claude responds.';
+    
+    setTimeout(() => {
+      const sendBtn = document.querySelector('button[aria-label*="Send"], button[data-testid*="send"]');
+      if (sendBtn && !sendBtn.disabled) sendBtn.click();
+    }, 100);
+  }
+
+  async function performInjection(statusTarget) {
+    const freshItems = scanForFileList();
+    const artifacts = freshItems.filter(i => i.source === 'generated');
+    if (artifacts.length === 0) {
+      if (statusTarget) statusTarget.textContent = 'Scan first (↺).';
+      return;
+    }
+
+    const pasteField = document.getElementById('cas-paste-json');
+    const pasteText = (pasteField && pasteField.value) ? pasteField.value.trim() : '';
+    let jsonText = pasteText;
+    
+    if (!jsonText) {
+      const responses = document.querySelectorAll('[data-is-streaming="false"] .font-claude-response');
+      if (responses.length === 0) {
+        if (statusTarget) statusTarget.textContent = 'No response found. Paste JSON or wait.';
+        return;
+      }
+      jsonText = responses[responses.length - 1].textContent.trim();
+    }
+
+    const match = jsonText.match(/\{[\s\S]*\}/) || jsonText.match(/\[[\s\S]*\]/);
+    if (!match) {
+      if (statusTarget) statusTarget.textContent = 'No JSON found — check format.';
+      return;
+    }
+
+    try {
+      let cleanMatch = match[0]
+          .replace(/^```(json)?\s*/i, '')
+          .replace(/\s*```$/i, '')
+          .trim();
+          
+      console.log('[CAS] Attempting to parse:', cleanMatch);
+      const parsed = JSON.parse(cleanMatch);
+      let count = 0;
+      
+      const slugMappedParsed = {};
+      if (!Array.isArray(parsed)) {
+        for (const k in parsed) slugMappedParsed[toSlug(k)] = parsed[k];
+      }
+
+      for (const [idx, artifact] of artifacts.entries()) {
+        if (Array.isArray(parsed)) {
+          if (parsed[idx]) {
+            await injectAndStore(artifact.node, artifact.data.name, parsed[idx]);
+            count++;
+          }
+        } else {
+          const artifactSlug = artifact.data.slug;
+          const directSummary = slugMappedParsed[artifactSlug];
+          
+          if (directSummary) {
+            console.log(`[CAS] Match! ${artifact.data.name} -> Slug: ${artifactSlug}`);
+            await injectAndStore(artifact.node, artifact.data.name, directSummary);
+            count++;
+          } else {
+            // Partial slug match
+            for (const sKey in slugMappedParsed) {
+              if (artifactSlug && sKey && (artifactSlug.includes(sKey) || sKey.includes(artifactSlug))) {
+                console.log(`[CAS] Partial Match! ${artifact.data.name} (~${sKey})`);
+                await injectAndStore(artifact.node, artifact.data.name, slugMappedParsed[sKey]);
+                count++;
+                break;
+              }
+            }
+          }
+        }
+      }
+
+      console.log(`[CAS] Injection complete. Total: ${count}`);
+      if (statusTarget) {
+        statusTarget.textContent = `✓ Injected ${count} summaries (persisted)`;
+      }
+      if (pasteField) pasteField.value = '';
+      
+      // Update UI state
+      const list = document.getElementById('cas-list');
+      const dataNote = document.getElementById('cas-data-note');
+      const dataSummary = document.getElementById('cas-data-summary');
+      if (list) renderList(freshItems, list, statusTarget, dataNote, dataSummary);
+      
+      refreshSummariseBadge();
+    } catch(e) {
+      console.error('[CAS] Parse Error:', e, 'Input was:', jsonText);
+      if (statusTarget) statusTarget.textContent = `Error: ${e.message.slice(0, 30)}`;
+    }
+  }
+
   async function renderProjectView() {
     const el = document.getElementById('cas-project-list');
     if (!el) return;
@@ -848,7 +982,7 @@
     const projectIndexKeys = Object.keys(allData).filter(k => k.startsWith('proj_') && k.endsWith('_chat_index'));
 
     if (projectIndexKeys.length === 0) {
-      el.innerHTML = '<div style="color:#555;font-size:10px;padding:8px">No recorded projects found yet.</div>';
+      el.innerHTML = '<div style="color:#999;font-size:10px;padding:8px">No recorded projects found yet.</div>';
       return;
     }
 
@@ -886,15 +1020,15 @@
           chatId === currentChat ? 'border-color:#2a2e36;background:#13161b' : '',
         ].join(';');
 
-        const dot = chatId === currentChat ? '<span style="color:#f0c040">●</span>' : '<span style="color:#2a2e36">○</span>';
+        const dot = chatId === currentChat ? '<span style="color:#f0c040">●</span>' : '<span style="color:#444">○</span>';
         const hasArtifacts = (meta.artifactCount || 0) > 0;
-        const expandIcon = hasArtifacts ? '<span class="cas-expand-icon" style="color:#444;font-size:9px;flex-shrink:0">▶</span>' : '';
+        const expandIcon = hasArtifacts ? '<span class="cas-expand-icon" style="color:#aaa;font-size:9px;flex-shrink:0">▶</span>' : '';
         row.innerHTML = `
           ${dot}
-          <span style="flex:1;font-size:10px;color:#c8cdd6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${meta.name}">${meta.name}</span>
-          <span style="font-size:9px;color:#444;flex-shrink:0">${meta.artifactCount || 0} ⬡</span>
-          <span style="font-size:9px;color:#333;flex-shrink:0">${meta.lastSeen || ''}</span>
-          <a href="https://claude.ai/chat/${chatId}" target="_blank" rel="noopener" title="Open in new tab" style="color:#444;font-size:11px;flex-shrink:0;text-decoration:none;padding:0 2px;line-height:1" onclick="event.stopPropagation()">↗</a>
+          <span style="flex:1;font-size:10px;color:#f5f5f5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${meta.name}">${meta.name}</span>
+          <span style="font-size:9px;color:#aaa;flex-shrink:0">${meta.artifactCount || 0} ⬡</span>
+          <span style="font-size:9px;color:#888;flex-shrink:0">${meta.lastSeen || ''}</span>
+          <a href="https://claude.ai/chat/${chatId}" target="_blank" rel="noopener" title="Open in new tab" style="color:#aaa;font-size:11px;flex-shrink:0;text-decoration:none;padding:0 2px;line-height:1" onclick="event.stopPropagation()">↗</a>
           ${expandIcon}
         `;
 
@@ -920,7 +1054,7 @@
               ]);
               const names = Object.keys(sums).length > 0 ? Object.keys(sums) : Object.keys(seen);
               if (names.length === 0) {
-                artifactList.innerHTML = '<div style="color:#444;font-size:9px;padding:3px 0">No artifact data — visit chat to record</div>';
+                artifactList.innerHTML = '<div style="color:#999;font-size:9px;padding:3px 0">No artifact data — visit chat to record</div>';
               } else {
                 names.forEach(name => {
                   const aRow = document.createElement('div');
@@ -930,10 +1064,10 @@
                   aRow.innerHTML = `
                     <div style="display:flex;gap:4px;align-items:center">
                       <span style="color:#6bcf6b;font-size:9px">⬡</span>
-                      <span style="font-size:9px;color:#aaa;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${name}">${name.slice(0,30)}</span>
-                      ${ts ? `<span style="font-size:8px;color:#333">${ts}</span>` : ''}
+                      <span style="font-size:9px;color:#f5f5f5;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${name}">${name.slice(0,30)}</span>
+                      ${ts ? `<span style="font-size:8px;color:#888">${ts}</span>` : ''}
                     </div>
-                    ${summary ? `<div style="font-size:8px;color:#666;padding-top:2px;line-height:1.3">${summary}</div>` : ''}
+                    ${summary ? `<div style="font-size:8px;color:#aaa;padding-top:2px;line-height:1.3">${summary}</div>` : ''}
                   `;
                   artifactList.appendChild(aRow);
                 });
@@ -1121,7 +1255,7 @@
       }
 
       #cas-sort-row label {
-        color: #666;
+        color: #aaa;
         font-size: 10px;
         white-space: nowrap;
         letter-spacing: 0.06em;
@@ -1160,7 +1294,7 @@
 
       #cas-status {
         font-size: 10px;
-        color: #555;
+        color: #999;
         margin-bottom: 8px;
         padding: 4px 6px;
         background: #0a0c0f;
@@ -1199,7 +1333,7 @@
 
       .cas-index {
         font-size: 9px;
-        color: #444;
+        color: #aaa;
         width: 14px;
         text-align: right;
         flex-shrink: 0;
@@ -1231,20 +1365,20 @@
         text-overflow: ellipsis;
         white-space: nowrap;
         font-size: 10.5px;
-        color: #c8cdd6;
+        color: #f5f5f5;
         letter-spacing: 0.02em;
       }
 
       .cas-meta {
         font-size: 9px;
-        color: #4a5060;
+        color: #888;
         white-space: nowrap;
         flex-shrink: 0;
       }
 
       .cas-score {
         font-size: 8px;
-        color: #2a3040;
+        color: #555;
         flex-shrink: 0;
         width: 16px;
         text-align: right;
@@ -1257,14 +1391,14 @@
         border-radius: 3px;
         border-left: 2px solid #2a2e36;
         font-size: 9.5px;
-        color: #555;
+        color: #999;
         line-height: 1.5;
       }
 
       #cas-full-dump {
         background: none;
         border: 1px solid #2a2e36;
-        color: #555;
+        color: #888;
         padding: 2px 7px;
         border-radius: 3px;
         font-family: inherit;
@@ -1292,7 +1426,7 @@
       .cas-group-header:first-child { margin-top: 0; }
 
       .cas-group-count {
-        color: #333;
+        color: #888;
         font-size: 9px;
       }
 
@@ -1307,7 +1441,7 @@
       .cas-tab {
         background: none;
         border: 1px solid #2a2e36;
-        color: #555;
+        color: #888;
         padding: 3px 10px;
         border-radius: 3px;
         font-family: inherit;
@@ -1377,7 +1511,7 @@
         flex: 1;
         background: none;
         border: 1px solid #2a2e36;
-        color: #888;
+        color: #aaa;
         padding: 4px 8px;
         border-radius: 3px;
         font-family: inherit;
@@ -1394,7 +1528,7 @@
         box-sizing: border-box;
         background: #0a0c0f;
         border: 1px solid #2a2e36;
-        color: #888;
+        color: #aaa;
         padding: 5px 7px;
         border-radius: 3px;
         font-family: inherit;
@@ -1405,7 +1539,7 @@
         line-height: 1.4;
       }
       #cas-paste-json:focus { border-color: #f0c040; color: #c8cdd6; }
-      #cas-paste-json::placeholder { color: #333; }
+      #cas-paste-json::placeholder { color: #555; }
 
       #cas-summary-row {
         display: flex;
@@ -1636,29 +1770,66 @@
       i.source === 'generated' && i.data.name && !stored[i.data.name]
     );
 
+    const summaryRow = document.getElementById('cas-summary-row');
+    if (summaryRow) {
+      summaryRow.style.display = unsummarised.length > 0 ? 'block' : 'none';
+    }
+
     const bar = document.getElementById('cas-sidebar-bar');
     if (!bar) return;
     
-    let badge = document.getElementById('cas-new-badge');
+    let toolbar = document.getElementById('cas-sidebar-toolbar');
     
-    // If no new items, remove the badge
+    // If no new items, remove the toolbar
     if (unsummarised.length === 0) {
-      if (badge) badge.remove();
+      if (toolbar) toolbar.remove();
       return;
     }
 
-    if (!badge) {
-      badge = document.createElement('button');
-      badge.id = 'cas-new-badge';
-      badge.style.cssText = [
+    if (!toolbar) {
+      toolbar = document.createElement('div');
+      toolbar.id = 'cas-sidebar-toolbar';
+      toolbar.style.cssText = [
+        'display:flex','gap:4px','align-items:center','margin-left:auto',
+      ].join(';');
+      
+      const sBtn = document.createElement('button');
+      sBtn.textContent = '⬡ SUMMARISE';
+      sBtn.title = `Generate prompt for ${unsummarised.length} new artifacts`;
+      sBtn.style.cssText = [
         'background:#f0c040','border:none','color:#0d0f12',
         'padding:2px 7px','border-radius:3px','font-family:monospace',
-        'font-size:9px','font-weight:600','cursor:pointer','margin-left:auto',
+        'font-size:9px','font-weight:600','cursor:pointer',
       ].join(';');
-      bar.appendChild(badge);
+      sBtn.onclick = (e) => {
+          e.stopPropagation();
+          performSummarise();
+      };
+
+      const iBtn = document.createElement('button');
+      iBtn.textContent = '↓ INJECT';
+      iBtn.title = 'Inject parsed AI response';
+      iBtn.style.cssText = [
+        'background:#2a2e36','border:1px solid #444','color:#ccc',
+        'padding:2px 7px','border-radius:3px','font-family:monospace',
+        'font-size:9px','font-weight:600','cursor:pointer',
+      ].join(';');
+      iBtn.onclick = (e) => {
+          e.stopPropagation();
+          performInjection();
+      };
+
+      toolbar.appendChild(sBtn);
+      toolbar.appendChild(iBtn);
+      bar.appendChild(toolbar);
+    } else {
+        // Update counts if already there
+        const sBtn = toolbar.querySelector('button:first-child');
+        if (sBtn) {
+            sBtn.textContent = `⬡ SUMMARISE (${unsummarised.length})`;
+            sBtn.title = `Generate prompt for ${unsummarised.length} new artifacts`;
+        }
     }
-    badge.textContent = `${unsummarised.length} new — summarise?`;
-    badge.onclick = () => sendSummaryPromptToChat(unsummarised, badge);
   }
 
   // GAP 3: fills input WITHOUT auto-sending — user reviews before hitting send
