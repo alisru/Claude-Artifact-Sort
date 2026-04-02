@@ -11,6 +11,11 @@
   const STORAGE_KEY = 'cas_sort_prefs';
   const SCAN_INTERVAL = 1200; // ms between rescans
 
+  // ─── Module-level state (GAP 1: SPA nav tracking) ────────────────────────
+  let artifactObserverRef = null; // kept so we can disconnect on chat change
+  let currentChatId = null;
+  let activeSortMode = 'dom-order';
+
   // Selectors to try — Claude's classes are hashed so we cast a wide net
   // and score candidates by structural likelihood.
   const CANDIDATE_SELECTORS = [
@@ -97,6 +102,30 @@
             allAttributes: Object.fromEntries(Array.from(node.attributes).map(a => [a.name, a.value])),
             allDataAttributes: {},
             rawText: name, tagName: node.tagName, classes: safeClassName(node),
+          }
+        };
+      })
+      .filter(i => i.data.name);
+  }
+
+  function scanUploads() {
+    // Uploaded files: look for role="button" with an inner SVG and no chat generation marks
+    // Usually these are inside messages or in a file tray.
+    return Array.from(document.querySelectorAll('[data-testid="file-thumbnail"], [class*="max-w-[12rem]"]'))
+      .filter(node => !node.querySelector('a[href]') && node.querySelector('h3'))
+      .map(node => {
+        const h3 = node.querySelector('h3');
+        const typeBadge = node.querySelector('p.uppercase, p[class*="uppercase"]');
+        return {
+          node, score: 0, source: 'uploaded',
+          data: {
+            name: h3 ? h3.textContent.trim() : null,
+            type: typeBadge ? typeBadge.textContent.trim().toUpperCase() : null,
+            date: null, size: null, id: null,
+            allAttributes: Object.fromEntries(Array.from(node.attributes).map(a => [a.name, a.value])),
+            allDataAttributes: {},
+            rawText: h3 ? h3.textContent.trim() : '',
+            tagName: node.tagName, classes: safeClassName(node),
           }
         };
       })
@@ -211,19 +240,47 @@
   }
 
   function injectSidebarSortBar(items) {
-    // Remove any existing injected bar
-    document.getElementById('cas-sidebar-bar')?.remove();
+    if (!items || items.length === 0) return;
 
-    // Find the artifact list container — the flex-col gap-2 div inside the Artifacts section
+    // We must find the TRUE side-panel container, avoiding inline chat message containers.
+    // 1. Priority check: Claude's side panel has an 'Artifacts' header above the list.
     let listContainer = null;
     document.querySelectorAll('h3').forEach(h => {
-      if (h.textContent.trim() === 'Artifacts') {
-        // Walk down to find the div containing the artifact cards
+      if (h.textContent.trim().startsWith('Artifact')) {
         const section = h.closest('[class*="overflow"]') || h.parentElement?.parentElement;
-        if (section) listContainer = section.querySelector('[class*="flex-col"][class*="gap-2"]');
+        if (section) {
+          // Find the wrapper using either flex classes, or simply the parent of the first button inside the section
+          listContainer = section.querySelector('[class*="flex-col"][class*="gap-2"]') || section.querySelector('[role="button"]')?.parentElement;
+        }
       }
     });
+
+    // 2. Fallback: Identify the parent element holding the most artifact cards.
+    // Inline messages rarely hold as many cards as the consolidated side panel list.
+    if (!listContainer) {
+      const parentCounts = new Map();
+      items.forEach(item => {
+        const p = item.node.parentElement;
+        parentCounts.set(p, (parentCounts.get(p) || 0) + 1);
+      });
+      let maxCards = 0;
+      for (const [p, count] of parentCounts.entries()) {
+        if (count > maxCards) {
+          maxCards = count;
+          listContainer = p;
+        }
+      }
+    }
+
     if (!listContainer) return;
+
+    // If it's already properly mounted in this container, we don't need to rebuild it (prevents flickering)
+    const existingBar = document.getElementById('cas-sidebar-bar');
+    if (existingBar && listContainer.contains(existingBar) && listContainer.firstChild === existingBar) {
+      if (activeSortMode && activeSortMode !== 'dom-order') applySort(items, activeSortMode);
+      return;
+    }
+    existingBar?.remove();
 
     const bar = document.createElement('div');
     bar.id = 'cas-sidebar-bar';
@@ -240,13 +297,31 @@
       <button data-cas-sort="dom-order" style="${sidebarBtnStyle()}">↺</button>
     `;
 
+    // Apply active sort immediately if returning from closed state
+    if (activeSortMode && activeSortMode !== 'dom-order') {
+      applySort(items, activeSortMode);
+      bar.querySelectorAll('button').forEach(b => b.style.color = '#555');
+      const activeBtn = bar.querySelector(`[data-cas-sort="${activeSortMode}"]`);
+      if (activeBtn) activeBtn.style.color = '#f0c040';
+    }
+
     bar.querySelectorAll('button').forEach(btn => {
       btn.addEventListener('click', e => {
         const mode = btn.getAttribute('data-cas-sort');
-        applySort(items.filter(i => i.source === 'generated'), mode);
+        applySort(items, mode);
+        activeSortMode = mode; // Save global state so it survives sidebar re-opening!
+
         // Update active state
         bar.querySelectorAll('button').forEach(b => b.style.color = '#555');
         if (mode !== 'dom-order') btn.style.color = '#f0c040';
+        
+        // Also sync floating panel UI if open
+        const floatSelect = document.getElementById('cas-sort-mode');
+        if (floatSelect) {
+          floatSelect.value = mode;
+          const status = document.getElementById('cas-status');
+          if (status) status.textContent = `Sorted: ${mode}`;
+        }
       });
     });
 
@@ -269,31 +344,18 @@
   }
 
   function scanForFileList() {
-    const uploads   = scanUploads();
     const generated = scanGenerated();
-    const project   = scanProject();
 
-    console.group('[CAS] Scan results');
-    console.log('uploads:', uploads.length, uploads.map(i => i.data.name));
-    console.log('generated:', generated.length, generated.map(i => i.data.name));
-    console.log('project:', project.length, project.map(i => i.data.name));
-    console.groupEnd();
+    // Deduplicate by name and node
+    const seenNames = new Set();
+    const seenNodes = new Set();
+    const all = generated.filter(i => {
+      if (!i.data.name || seenNames.has(i.data.name) || seenNodes.has(i.node)) return false;
+      seenNames.add(i.data.name);
+      seenNodes.add(i.node);
+      return true;
+    });
 
-    // Deduplicate within each bucket by name
-    const dedup = items => {
-      const seenNames = new Set();
-      const seenNodes = new Set();
-      return items.filter(i => {
-        if (!i.data.name || seenNames.has(i.data.name) || seenNodes.has(i.node)) return false;
-        seenNames.add(i.data.name);
-        seenNodes.add(i.node);
-        return true;
-      });
-    };
-
-    const all = [...dedup(uploads), ...dedup(generated), ...dedup(project)];
-
-    // Record first-seen timestamps and re-inject stored summaries
     recordFirstSeen(all);
     loadAndInjectStoredSummaries(all);
     injectSidebarSortBar(all);
@@ -520,20 +582,26 @@
         <div id="cas-sort-row">
           <label>Sort by</label>
           <select id="cas-sort-mode">
-            <option value="dom-order">Original order</option>
-            <option value="name-asc">Name A→Z</option>
-            <option value="name-desc">Name Z→A</option>
+            <option value="dom-order" ${activeSortMode === 'dom-order' ? 'selected' : ''}>Original order</option>
+            <option value="name-asc" ${activeSortMode === 'name-asc' ? 'selected' : ''}>Name A→Z</option>
+            <option value="name-desc" ${activeSortMode === 'name-desc' ? 'selected' : ''}>Name Z→A</option>
           </select>
           <button id="cas-apply">Apply</button>
         </div>
         <div id="cas-summary-row">
-          <select id="cas-sum-length">
-            <option value="1">1 sentence</option>
-            <option value="2">2–3 sentences</option>
-            <option value="5">5 sentences</option>
-          </select>
-          <button id="cas-sum-copy">⎘ Copy prompt</button>
-          <button id="cas-summarise">↓ Inject</button>
+          <div style="display:flex;gap:5px;align-items:center">
+            <select id="cas-sum-length">
+              <option value="1">1 sentence</option>
+              <option value="2">2–3 sentences</option>
+              <option value="5">5 sentences</option>
+            </select>
+            <button id="cas-sum-copy">⎘ Copy prompt</button>
+          </div>
+          <div style="display:flex;gap:5px;align-items:center;margin-top:5px">
+            <button id="cas-summarise">↓ Summarise</button>
+            <button id="cas-inject">↓ Inject</button>
+          </div>
+          <textarea id="cas-paste-json" placeholder="Or paste JSON array here to inject manually…" rows="2"></textarea>
         </div>
         <div id="cas-status">Click ↺ to scan</div>
         <div id="cas-list"></div>
@@ -558,7 +626,6 @@
 
   function bindPanelEvents(panel) {
     let collapsed = false;
-    let currentItems = [];
 
     const body = document.getElementById('cas-body');
     const status = document.getElementById('cas-status');
@@ -579,31 +646,34 @@
     document.getElementById('cas-scan').addEventListener('click', () => {
       status.textContent = 'Scanning…';
       list.innerHTML = '';
-      requestAnimationFrame(() => {
-        currentItems = scanForFileList();
-        renderList(currentItems, list, status, dataNote, dataSummary);
+      requestAnimationFrame(async () => {
+        const items = scanForFileList();
+        renderList(items, list, status, dataNote, dataSummary);
+        await refreshSummariseBadge();
       });
     });
 
     document.getElementById('cas-apply').addEventListener('click', () => {
-      if (currentItems.length === 0) {
+      let items = scanForFileList();
+      if (items.length === 0) {
         status.textContent = 'Scan first (↺)';
         return;
       }
       const mode = document.getElementById('cas-sort-mode').value;
-      applySort(currentItems, mode);
+      applySort(items, mode);
       status.textContent = `Sorted: ${mode}`;
       // Rescan after sort
-      requestAnimationFrame(() => requestAnimationFrame(() => {
-        currentItems = scanForFileList();
-        renderList(currentItems, list, status, dataNote, dataSummary);
+      requestAnimationFrame(() => requestAnimationFrame(async () => {
+        items = scanForFileList();
+        renderList(items, list, status, dataNote, dataSummary);
+        await refreshSummariseBadge();
       }));
     });
 
     document.getElementById('cas-inspect').addEventListener('click', () => {
-      currentItems = scanForFileList();
+      const items = scanForFileList();
       console.group('[CAS] Full DOM dump — all artifact candidates');
-      currentItems.forEach(({ node, score, data, source }, i) => {
+      items.forEach(({ node, score, data, source }, i) => {
         console.group(`[${i}] Source: ${source} | Score: ${score} | Name: ${data.name}`);
         console.log('Node:', node);
         console.log('Extracted data:', data);
@@ -627,53 +697,84 @@
         console.groupEnd();
       });
       console.groupEnd();
-      status.textContent = `Dumped ${currentItems.length} nodes to console`;
+      status.textContent = `Dumped ${items.length} nodes to console`;
     });
 
     document.getElementById('cas-full-dump')?.addEventListener('click', () => {
       document.getElementById('cas-inspect').click();
     });
 
-    // ── Copy prompt ────────────────────────────────────────────────────────
+    // ── ⎘ Copy prompt — clipboard only, no send (unchanged) ───────────────
     document.getElementById('cas-sum-copy').addEventListener('click', () => {
+      const artifacts = scanForFileList().filter(i => i.source === 'generated');
+      if (artifacts.length === 0) { status.textContent = 'Scan first (↺).'; return; }
+      const sentences = document.getElementById('cas-sum-length').value;
+      const lenLabel = sentences === '1' ? '1 sentence' : sentences === '2' ? '2-3 sentences' : '5 sentences';
+      const names = artifacts.map(a => a.data.name).join('\n');
+      const prompt = `For each file below write exactly ${lenLabel} describing what it contains.\nReply with a JSON object only — keys are the exact filenames, values are the summaries. No other text.\n\n${names}`;
+      navigator.clipboard.writeText(prompt).then(() => {
+        status.textContent = `✓ Prompt copied — send in chat, then click ↓ Inject`;
+      });
+    });
+
+    // ── ↓ Summarise — fills input AND auto-sends (GAP 2) ──────────────────
+    document.getElementById('cas-summarise').addEventListener('click', () => {
       const artifacts = currentItems.filter(i => i.source === 'generated');
       if (artifacts.length === 0) { status.textContent = 'Scan first (↺).'; return; }
       const sentences = document.getElementById('cas-sum-length').value;
       const lenLabel = sentences === '1' ? '1 sentence' : sentences === '2' ? '2-3 sentences' : '5 sentences';
-      const names = artifacts.map((a, i) => `${i + 1}. ${a.data.name}`).join('\n');
-      const prompt = `For each file below write exactly ${lenLabel} describing what it contains. Reply with a JSON array of strings only, one per file, same order, no other text.\n\n${names}`;
-      navigator.clipboard.writeText(prompt).then(() => {
-        status.textContent = `✓ Prompt copied — paste into chat, send, then click ↓ Inject`;
-      });
+      const names = artifacts.map(a => a.data.name).join('\n');
+      const prompt = `For each file below write exactly ${lenLabel} describing what it contains.\nReply with a JSON object only — keys are the exact filenames, values are the summaries. No other text.\n\n${names}`;
+      const input = document.querySelector('[contenteditable="true"][data-testid="composer-input"], .ProseMirror[contenteditable="true"]')
+        || document.querySelector('[contenteditable="true"]');
+      if (!input) { status.textContent = 'Chat input not found.'; return; }
+      input.focus();
+      document.execCommand('selectAll', false, null);
+      document.execCommand('insertText', false, prompt);
+      status.textContent = '↓ Sending prompt — click ↓ Inject after Claude responds.';
+      setTimeout(() => {
+        const sendBtn = document.querySelector('button[aria-label*="Send"], button[data-testid*="send"]');
+        if (sendBtn && !sendBtn.disabled) sendBtn.click();
+      }, 100);
     });
 
-    // ── Inject from last Claude response ──────────────────────────────────
-    document.getElementById('cas-summarise').addEventListener('click', async () => {
+    // ── ↓ Inject — reads paste field first, then last DOM response (GAPs 2,5) ──
+    document.getElementById('cas-inject').addEventListener('click', async () => {
       const artifacts = currentItems.filter(i => i.source === 'generated');
       if (artifacts.length === 0) { status.textContent = 'Scan first (↺).'; return; }
-
-      // Find the last Claude response in the DOM
-      const responses = document.querySelectorAll('[data-is-streaming="false"] .font-claude-response');
-      if (responses.length === 0) { status.textContent = 'No Claude response found.'; return; }
-      const lastResponse = responses[responses.length - 1];
-      const text = lastResponse.textContent.trim();
-
-      // Parse JSON array from the response
-      const match = text.match(/\[[\s\S]*\]/);
-      if (!match) { status.textContent = 'No JSON array found in last response.'; return; }
+      const pasteField = document.getElementById('cas-paste-json');
+      const pasteText = pasteField ? pasteField.value.trim() : '';
+      let jsonText = pasteText;
+      if (!jsonText) {
+        const responses = document.querySelectorAll('[data-is-streaming="false"] .font-claude-response');
+        if (responses.length === 0) { status.textContent = 'No Claude response found. Paste JSON above or wait for response.'; return; }
+        jsonText = responses[responses.length - 1].textContent.trim();
+      }
+      // Match JSON object (name-keyed, new format) or array (positional fallback)
+      const match = jsonText.match(/\{[\s\S]*\}/) || jsonText.match(/\[[\s\S]*\]/);
+      if (!match) { status.textContent = 'No JSON found — check format.'; return; }
       try {
-        const summaries = JSON.parse(match[0]);
+        const parsed = JSON.parse(match[0]);
         let count = 0;
-        for (let i = 0; i < artifacts.length; i++) {
-          if (summaries[i]) {
-            await injectAndStore(artifacts[i].node, artifacts[i].data.name, summaries[i]);
-            count++;
+        if (Array.isArray(parsed)) {
+          // Positional fallback (old array format)
+          for (let i = 0; i < artifacts.length; i++) {
+            if (parsed[i]) { await injectAndStore(artifacts[i].node, artifacts[i].data.name, parsed[i]); count++; }
+          }
+        } else {
+          // Name-keyed (safe regardless of DOM order)
+          for (const artifact of artifacts) {
+            const summary = parsed[artifact.data.name];
+            if (summary) { await injectAndStore(artifact.node, artifact.data.name, summary); count++; }
           }
         }
         status.textContent = `✓ Injected ${count} summaries (persisted)`;
+        if (pasteField) pasteField.value = '';
         document.getElementById('cas-new-badge')?.remove();
+        currentItems = scanForFileList();
+        renderList(currentItems, list, status, dataNote, dataSummary);
       } catch(e) {
-        status.textContent = 'Could not parse response — check JSON format.';
+        status.textContent = 'Could not parse JSON — check format.';
       }
     });
 
@@ -740,52 +841,121 @@
     if (!el) return;
     el.innerHTML = '';
 
-    const proj = getProjectId();
-    if (!proj) {
-      el.innerHTML = '<div style="color:#555;font-size:10px;padding:8px">Not in a project.</div>';
+    // To get all tracked projects, we pull ALL local storage keys
+    const allData = await new Promise(r => chrome.storage.local.get(null, r));
+    
+    // Find all indexKeys: proj_${proj}_chat_index
+    const projectIndexKeys = Object.keys(allData).filter(k => k.startsWith('proj_') && k.endsWith('_chat_index'));
+
+    if (projectIndexKeys.length === 0) {
+      el.innerHTML = '<div style="color:#555;font-size:10px;padding:8px">No recorded projects found yet.</div>';
       return;
     }
-
-    const indexKey = `proj_${proj}_chat_index`;
-    const index = await new Promise(r => chrome.storage.local.get(indexKey, d => r(d[indexKey] || {})));
-    const chats = Object.entries(index);
-
-    if (chats.length === 0) {
-      el.innerHTML = '<div style="color:#555;font-size:10px;padding:8px">No chats recorded yet in this project.</div>';
-      return;
-    }
-
-    const projName = chats[0][1].projectName || proj.slice(0, 8);
-    const header = document.createElement('div');
-    header.style.cssText = 'color:#cfcf6b;font-size:9px;letter-spacing:0.1em;padding:4px 0 8px;font-weight:600';
-    header.textContent = `◈ ${projName} — ${chats.length} chat${chats.length !== 1 ? 's' : ''}`;
-    el.appendChild(header);
-
-    // Sort by lastSeen desc
-    chats.sort((a, b) => (b[1].lastSeen || '').localeCompare(a[1].lastSeen || ''));
 
     const currentChat = getChatId();
-    chats.forEach(([chatId, meta]) => {
-      const row = document.createElement('div');
-      row.style.cssText = [
-        'display:flex','align-items:center','gap:5px',
-        'padding:5px 6px','border-radius:3px','cursor:pointer',
-        'border:1px solid transparent',
-        chatId === currentChat ? 'border-color:#2a2e36;background:#13161b' : '',
-      ].join(';');
+    let anyRendered = false;
 
-      const dot = chatId === currentChat ? '<span style="color:#f0c040">●</span>' : '<span style="color:#2a2e36">○</span>';
-      row.innerHTML = `
-        ${dot}
-        <span style="flex:1;font-size:10px;color:#c8cdd6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${meta.name}">${meta.name}</span>
-        <span style="font-size:9px;color:#444;flex-shrink:0">${meta.artifactCount || 0} ⬡</span>
-        <span style="font-size:9px;color:#333;flex-shrink:0">${meta.lastSeen || ''}</span>
-      `;
-      row.addEventListener('click', () => {
-        window.location.href = `https://claude.ai/chat/${chatId}`;
+    for (const pKey of projectIndexKeys) {
+      const projId = pKey.split('_')[1];
+      const index = allData[pKey];
+      const chats = Object.entries(index);
+      
+      if (chats.length === 0) continue;
+      anyRendered = true;
+
+      const projName = chats[0][1].projectName || projId.slice(0, 8);
+      
+      const headerContainer = document.createElement('div');
+      headerContainer.style.cssText = 'margin-top: 6px; padding: 4px 6px; background: rgba(207, 207, 107, 0.05); border-radius: 4px; border: 1px solid rgba(207, 207, 107, 0.15);';
+      
+      const header = document.createElement('div');
+      header.style.cssText = 'color:#cfcf6b;font-size:9px;letter-spacing:0.1em;padding:4px 0 6px;font-weight:600';
+      header.textContent = `◈ ${projName} — ${chats.length} chat${chats.length !== 1 ? 's' : ''}`;
+      headerContainer.appendChild(header);
+
+      chats.sort((a, b) => (b[1].lastSeen || '').localeCompare(a[1].lastSeen || ''));
+
+      chats.forEach(([chatId, meta]) => {
+        const wrapper = document.createElement('div');
+
+        const row = document.createElement('div');
+        row.style.cssText = [
+          'display:flex','align-items:center','gap:5px',
+          'padding:4px 6px','border-radius:3px','cursor:pointer',
+          'border:1px solid transparent',
+          chatId === currentChat ? 'border-color:#2a2e36;background:#13161b' : '',
+        ].join(';');
+
+        const dot = chatId === currentChat ? '<span style="color:#f0c040">●</span>' : '<span style="color:#2a2e36">○</span>';
+        const hasArtifacts = (meta.artifactCount || 0) > 0;
+        const expandIcon = hasArtifacts ? '<span class="cas-expand-icon" style="color:#444;font-size:9px;flex-shrink:0">▶</span>' : '';
+        row.innerHTML = `
+          ${dot}
+          <span style="flex:1;font-size:10px;color:#c8cdd6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${meta.name}">${meta.name}</span>
+          <span style="font-size:9px;color:#444;flex-shrink:0">${meta.artifactCount || 0} ⬡</span>
+          <span style="font-size:9px;color:#333;flex-shrink:0">${meta.lastSeen || ''}</span>
+          <a href="https://claude.ai/chat/${chatId}" target="_blank" rel="noopener" title="Open in new tab" style="color:#444;font-size:11px;flex-shrink:0;text-decoration:none;padding:0 2px;line-height:1" onclick="event.stopPropagation()">↗</a>
+          ${expandIcon}
+        `;
+
+        // Artifact sub-list (lazy rendered on expand)
+        const artifactList = document.createElement('div');
+        artifactList.style.cssText = 'display:none;padding:0 6px 4px 18px';
+        let expanded = false;
+
+        row.addEventListener('click', async (e) => {
+          if (hasArtifacts) {
+            expanded = !expanded;
+            artifactList.style.display = expanded ? 'block' : 'none';
+            const icon = row.querySelector('.cas-expand-icon');
+            if (icon) icon.textContent = expanded ? '▼' : '▶';
+
+            if (expanded && artifactList.children.length === 0) {
+              const chatSumKey = `proj_${meta.projectId || projId}/chat_${chatId}_cas_summaries`;
+              const chatSeenKey = `proj_${meta.projectId || projId}/chat_${chatId}_cas_first_seen`;
+              
+              const [sums, seen] = await Promise.all([
+                new Promise(r => chrome.storage.local.get(chatSumKey, d => r(d[chatSumKey] || {}))),
+                new Promise(r => chrome.storage.local.get(chatSeenKey, d => r(d[chatSeenKey] || {}))),
+              ]);
+              const names = Object.keys(sums).length > 0 ? Object.keys(sums) : Object.keys(seen);
+              if (names.length === 0) {
+                artifactList.innerHTML = '<div style="color:#444;font-size:9px;padding:3px 0">No artifact data — visit chat to record</div>';
+              } else {
+                names.forEach(name => {
+                  const aRow = document.createElement('div');
+                  aRow.style.cssText = 'padding:3px 0;border-top:1px solid #1a1d22';
+                  const summary = sums[name] || '';
+                  const ts = seen[name] || '';
+                  aRow.innerHTML = `
+                    <div style="display:flex;gap:4px;align-items:center">
+                      <span style="color:#6bcf6b;font-size:9px">⬡</span>
+                      <span style="font-size:9px;color:#aaa;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${name}">${name.slice(0,30)}</span>
+                      ${ts ? `<span style="font-size:8px;color:#333">${ts}</span>` : ''}
+                    </div>
+                    ${summary ? `<div style="font-size:8px;color:#666;padding-top:2px;line-height:1.3">${summary}</div>` : ''}
+                  `;
+                  artifactList.appendChild(aRow);
+                });
+              }
+            }
+          } else {
+            history.pushState({}, '', `https://claude.ai/chat/${chatId}`);
+            window.dispatchEvent(new PopStateEvent('popstate', { state: {} }));
+          }
+        });
+
+        row.addEventListener('dblclick', () => {
+          history.pushState({}, '', `https://claude.ai/chat/${chatId}`);
+          window.dispatchEvent(new PopStateEvent('popstate', { state: {} }));
+        });
+
+        wrapper.appendChild(row);
+        wrapper.appendChild(artifactList);
+        headerContainer.appendChild(wrapper);
       });
-      el.appendChild(row);
-    });
+      el.appendChild(headerContainer);
+    }
   }
 
   function renderList(items, list, status, dataNote, dataSummary) {
@@ -1203,10 +1373,44 @@
       }
       #cas-summarise:hover { opacity: 0.85; }
 
+      #cas-inject {
+        flex: 1;
+        background: none;
+        border: 1px solid #2a2e36;
+        color: #888;
+        padding: 4px 8px;
+        border-radius: 3px;
+        font-family: inherit;
+        font-size: 10px;
+        font-weight: 600;
+        cursor: pointer;
+        white-space: nowrap;
+        transition: color 0.15s, border-color 0.15s;
+      }
+      #cas-inject:hover { color: #f0c040; border-color: #f0c040; }
+
+      #cas-paste-json {
+        width: 100%;
+        box-sizing: border-box;
+        background: #0a0c0f;
+        border: 1px solid #2a2e36;
+        color: #888;
+        padding: 5px 7px;
+        border-radius: 3px;
+        font-family: inherit;
+        font-size: 9px;
+        resize: vertical;
+        outline: none;
+        margin-top: 5px;
+        line-height: 1.4;
+      }
+      #cas-paste-json:focus { border-color: #f0c040; color: #c8cdd6; }
+      #cas-paste-json::placeholder { color: #333; }
+
       #cas-summary-row {
         display: flex;
         flex-direction: column;
-        gap: 5px;
+        gap: 0;
         margin-bottom: 8px;
         padding: 7px 8px;
         background: #0a0c0f;
@@ -1216,6 +1420,50 @@
 
     `;
     document.head.appendChild(s);
+  }
+
+  // ─── Render panel from storage (no live DOM scan needed) ───────────────────
+  // Used on chat switch so panel populates instantly even if Claude sidebar is closed
+
+  async function renderListFromStorage() {
+    const panel = document.getElementById(PANEL_ID);
+    if (!panel) return;
+    const list = document.getElementById('cas-list');
+    const status = document.getElementById('cas-status');
+    if (!list || !status) return;
+
+    const [summaries, seen] = await Promise.all([
+      storageGet('cas_summaries'),
+      storageGet('cas_first_seen'),
+    ]);
+    const names = Object.keys(seen);
+
+    if (names.length === 0) {
+      status.textContent = 'No stored artifacts for this chat.';
+      list.innerHTML = '';
+      return;
+    }
+
+    status.textContent = `\u2B21 ${names.length} stored artifact${names.length !== 1 ? 's' : ''} — rescanning\u2026`;
+    list.innerHTML = '';
+    names.forEach((name, i) => {
+      const row = document.createElement('div');
+      row.className = 'cas-row';
+      row.style.flexDirection = 'column';
+      row.style.alignItems = 'flex-start';
+      const ts = seen[name] || '';
+      const summary = summaries[name] || '';
+      row.innerHTML = `
+        <div style="display:flex;align-items:center;gap:5px;width:100%">
+          <span class="cas-index">${i + 1}</span>
+          <span class="cas-badge cas-type-unknown">\u2B21</span>
+          <span class="cas-name" title="${name}">${name.slice(0, 28)}</span>
+          ${ts ? `<span class="cas-meta">${ts}</span>` : ''}
+        </div>
+        ${summary ? `<div style="font-size:9px;color:#666;padding:2px 0 0 20px;line-height:1.3">${summary}</div>` : ''}
+      `;
+      list.appendChild(row);
+    });
   }
 
   // ─── Message Bridge (from popup) ──────────────────────────────────────────
@@ -1239,29 +1487,39 @@
 
   // Watch for new artifact cards appearing in the sidebar
   function watchForNewArtifacts() {
+    if (artifactObserverRef) return; // Prevent duplicate instantiation if already watching this chat!
+    
     let knownNames = new Set();
-    let newUnsummarised = [];
+    let lastArtifactNodes = new Set(); // Tracks structurally existing artifact nodes to prevent useless re-renders
     let debounceTimer = null;
+    let reinjecting = false; // guard: prevents re-triggering from our own DOM writes
 
-    // Find the artifacts container to scope the observer tightly
-    // rather than watching all of document.body
-    const getArtifactsContainer = () => {
-      for (const h of document.querySelectorAll('h3')) {
-        if (h.textContent.trim() === 'Artifacts') {
-          return h.closest('[class*="overflow"]') || h.parentElement?.parentElement;
-        }
-      }
-      return null;
-    };
+    // We MUST attach the observer to document.body!
+    // If we attach it to the Sidebar container, when the user closes the sidebar, 
+    // Claude destroys the container node. The observer gets disconnected forever,
+    // and never fires again when the sidebar is reopened. Document.body is permanent.
+    const container = document.body;
 
-    const container = getArtifactsContainer() || document.body;
+    const obs = new MutationObserver((mutations) => {
+      // Ignore mutations if they are exclusively our own UI elements (e.g. summary badges)
+      const isOnlyUs = mutations.every(m => {
+        if (m.target?.id === 'cas-sidebar-bar' || m.target?.id === PANEL_ID) return true;
+        if (m.target?.classList?.contains('cas-summary-badge')) return true;
+        let onlyOurNodes = true;
+        m.addedNodes.forEach(n => {
+          if (n.nodeType === 1 && !(n.id === 'cas-sidebar-bar' || n.id === PANEL_ID || n.classList?.contains('cas-summary-badge'))) onlyOurNodes = false;
+        });
+        m.removedNodes.forEach(n => {
+          if (n.nodeType === 1 && !(n.id === 'cas-sidebar-bar' || n.id === PANEL_ID || n.classList?.contains('cas-summary-badge'))) onlyOurNodes = false;
+        });
+        return (m.addedNodes.length > 0 || m.removedNodes.length > 0) ? onlyOurNodes : false;
+      });
 
-    const artifactObserver = new MutationObserver(() => {
-      // Debounce — only process after DOM settles for 500ms
+      if (isOnlyUs || reinjecting) return;
+
       clearTimeout(debounceTimer);
       debounceTimer = setTimeout(async () => {
         const generated = scanGenerated();
-        const summaries = await storageGet('cas_summaries');
         const firstSeen = await storageGet('cas_first_seen');
         let changed = false;
 
@@ -1275,23 +1533,120 @@
             firstSeen[name] = `${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')} ${now.getDate().toString().padStart(2,'0')}.${(now.getMonth()+1).toString().padStart(2,'0')}`;
             changed = true;
           }
-
-          if (!summaries[name]) newUnsummarised.push(item);
         });
 
         if (changed) await storageSet('cas_first_seen', firstSeen);
-        if (newUnsummarised.length > 0) updateSidebarBadge(newUnsummarised);
+
+        // Check if the physical artifact nodes have actually changed or appeared
+        let layoutChanged = generated.length !== lastArtifactNodes.size;
+        if (!layoutChanged) {
+          for (let g of generated) {
+             if (!lastArtifactNodes.has(g.node)) {
+                 layoutChanged = true; break;
+             }
+          }
+        }
+
+        // If nothing mathematically changed with the artifacts, and our bar is safely injected, 
+        // silently abort. No flickering, no CPU burn.
+        if (!layoutChanged && document.getElementById('cas-sidebar-bar')) {
+            obs.takeRecords();
+            return; 
+        }
+        
+        lastArtifactNodes = new Set(generated.map(g => g.node));
+
+        reinjecting = true;
+        const items = scanForFileList(); // Injects into Claude DOM synchronously
+        
+        // Auto-refresh the floating UI panel
+        if (document.getElementById(PANEL_ID)) {
+          const list = document.getElementById('cas-list');
+          const status = document.getElementById('cas-status');
+          const dataNote = document.getElementById('cas-data-note');
+          const dataSummary = document.getElementById('cas-data-summary');
+          if (list && items.length > 0) {
+            let finalItems = items;
+            if (activeSortMode !== 'dom-order') finalItems = scanForFileList(); 
+            renderList(finalItems, list, status, dataNote, dataSummary);
+          }
+        }
+        
+        // Clear all mutations caused by our synchronous reordering/injecting
+        obs.takeRecords();
+        reinjecting = false;
+
+        // Fire the asynchronous badge fetches (their DOM mutations are filtered out by isOnlyUs above safely!)
+        refreshSummariseBadge();
+
       }, 500);
     });
 
-    // childList only — no attribute watching, no character data
-    artifactObserver.observe(container, { childList: true, subtree: true });
+    obs.observe(container, { childList: true, subtree: true });
+
+    // Robust Polling Sync (Guarantees the Sort Bar injects if sidebar is visible)
+    // Sometimes React hydrates the DOM *after* the initial mutation event, causing the observer to miss it.
+    const pollInterval = setInterval(() => {
+      // 1. Inject Floating Panel Toggle Button next to native Claude controls
+      const nativeToggle = document.querySelector('[data-testid="wiggle-controls-actions-toggle"]');
+      if (nativeToggle && !document.getElementById('cas-panel-toggle')) {
+         const parent = nativeToggle.parentElement?.parentElement;
+         if (parent && parent.tagName !== 'BODY') {
+            const btn = document.createElement('div');
+            btn.id = 'cas-panel-toggle';
+            btn.className = 'w-fit';
+            btn.innerHTML = `<button class="inline-flex items-center justify-center relative isolate shrink-0 can-focus select-none transition duration-300 ease-[cubic-bezier(0.165,0.85,0.45,1)] h-8 w-8 rounded-md !bg-bg-400" type="button" aria-label="Open Sorter Panel" title="Open Sorter Panel" style="color:#888; border:1px solid #444; margin-right:4px;">⬡</button>`;
+            
+            btn.querySelector('button').addEventListener('click', () => {
+                buildPanel();
+                setTimeout(() => document.getElementById('cas-scan')?.click(), 50);
+            });
+            parent.insertBefore(btn, nativeToggle.parentElement);
+         }
+      }
+
+      if (reinjecting) return;
+      const hasSidebar = Array.from(document.querySelectorAll('h3')).some(h => h.textContent.trim() === 'Artifacts');
+      
+      // If the sidebar is visibly in the DOM, but our sort bar is entirely missing:
+      if (hasSidebar && !document.getElementById('cas-sidebar-bar')) {
+        reinjecting = true;
+        scanForFileList(); // Forcibly re-inject it!
+        // We use takeRecords and sync injection here because we don't have event context
+        obs.takeRecords();
+        reinjecting = false;
+      }
+    }, 1000);
+
+    // Bundle disconnection methods together so SPA nav clears everything properly
+    artifactObserverRef = {
+      disconnect: () => {
+        obs.disconnect();
+        clearInterval(pollInterval);
+      }
+    };
   }
 
-  function updateSidebarBadge(newItems) {
+  async function refreshSummariseBadge() {
+    const stored = await storageGet('cas_summaries');
+    const generated = scanGenerated();
+    
+    // Only artifacts that are generated, have a name, and don't have a stored summary yet
+    const unsummarised = generated.filter(i => 
+      i.source === 'generated' && i.data.name && !stored[i.data.name]
+    );
+
     const bar = document.getElementById('cas-sidebar-bar');
     if (!bar) return;
+    
     let badge = document.getElementById('cas-new-badge');
+    
+    // If no new items, remove the badge
+    if (unsummarised.length === 0) {
+      if (badge) badge.remove();
+      return;
+    }
+
     if (!badge) {
       badge = document.createElement('button');
       badge.id = 'cas-new-badge';
@@ -1302,48 +1657,153 @@
       ].join(';');
       bar.appendChild(badge);
     }
-    badge.textContent = `${newItems.length} new — summarise?`;
-    badge.onclick = () => sendSummaryPromptToChat(newItems);
+    badge.textContent = `${unsummarised.length} new — summarise?`;
+    badge.onclick = () => sendSummaryPromptToChat(unsummarised, badge);
   }
 
-  function sendSummaryPromptToChat(items) {
-    const names = items.map((a, i) => `${i + 1}. ${a.data.name}`).join('\n');
-    const prompt = `For each file below write exactly 1 sentence describing what it contains. Reply with a JSON array of strings only, one per file, same order, no other text.\n\n${names}`;
+  // GAP 3: fills input WITHOUT auto-sending — user reviews before hitting send
+  // GAP 4: badge transitions to "↓ Inject" state instead of disappearing
+  // GAP 6: respects length selector if panel is open
+  function sendSummaryPromptToChat(items, badge) {
+    const sentences = document.getElementById('cas-sum-length')?.value || '1';
+    const lenLabel = sentences === '1' ? '1 sentence' : sentences === '2' ? '2-3 sentences' : '5 sentences';
+    const names = items.map(a => a.data.name).join('\n');
+    const prompt = `For each file below write exactly ${lenLabel} describing what it contains.\nReply with a JSON object only — keys are the exact filenames, values are the summaries. No other text.\n\n${names}`;
 
     // Find ProseMirror input
     const input = document.querySelector('[contenteditable="true"][data-testid="composer-input"], .ProseMirror[contenteditable="true"]')
       || document.querySelector('[contenteditable="true"]');
     if (!input) return;
 
-    // Focus and set content
+    // Fill input — do NOT auto-send (GAP 3)
     input.focus();
     document.execCommand('selectAll', false, null);
     document.execCommand('insertText', false, prompt);
 
-    // Click send button
-    setTimeout(() => {
-      const sendBtn = document.querySelector('button[aria-label*="Send"], button[data-testid*="send"]');
-      if (sendBtn && !sendBtn.disabled) sendBtn.click();
-    }, 100);
-
-    // Remove badge
-    document.getElementById('cas-new-badge')?.remove();
+    // GAP 4: transition badge to "↓ Inject" and wire it to inject flow
+    if (badge) {
+      badge.textContent = '↓ Inject';
+      badge.onclick = async () => {
+        const artifacts = scanGenerated().filter(i => i.data.name);
+        const responses = document.querySelectorAll('[data-is-streaming="false"] .font-claude-response');
+        if (responses.length === 0) { return; }
+        const text = responses[responses.length - 1].textContent.trim();
+        const match = text.match(/\{[\s\S]*\}/) || text.match(/\[[\s\S]*\]/);
+        if (!match) return;
+        try {
+          const parsed = JSON.parse(match[0]);
+          if (Array.isArray(parsed)) {
+            for (let i = 0; i < artifacts.length; i++) {
+              if (parsed[i]) await injectAndStore(artifacts[i].node, artifacts[i].data.name, parsed[i]);
+            }
+          } else {
+            for (const artifact of artifacts) {
+              const summary = parsed[artifact.data.name];
+              if (summary) await injectAndStore(artifact.node, artifact.data.name, summary);
+            }
+          }
+          badge.remove();
+        } catch(e) { /* silent */ }
+      };
+    }
   }
 
   if (window.location.hostname === 'claude.ai') {
-    // Build panel once the sidebar h3 "Artifacts" appears — no fixed timeout
-    let panelBuilt = false;
-    const initObserver = new MutationObserver(() => {
-      if (panelBuilt) return;
-      const hasArtifacts = Array.from(document.querySelectorAll('h3'))
-        .some(h => h.textContent.trim() === 'Artifacts');
-      if (!hasArtifacts) return;
-      panelBuilt = true;
-      initObserver.disconnect();
-      buildPanel();
-      watchForNewArtifacts();
+
+    // ── GAP 1: SPA chat-switch handler ─────────────────────────────────────
+    // currentChatId is initialized to null globally.
+
+    function onChatChange() {
+      const newId = getChatId();
+      if (newId === currentChatId) return;
+      currentChatId = newId;
+      
+      // We intentionally do NOT reset activeSortMode here. 
+      // If the user picked A->Z, we want the next chat they click to ALSO be A->Z automatically.
+
+      // Disconnect old artifact observer
+      if (artifactObserverRef) { artifactObserverRef.disconnect(); artifactObserverRef = null; }
+
+      // Clear sidebar bar immediately — it belongs to the old chat
+      document.getElementById('cas-sidebar-bar')?.remove();
+
+      // Show switching status in panel if open
+      const panelStatus = document.getElementById('cas-status');
+      if (panelStatus) panelStatus.textContent = 'Chat changed — scanning…';
+
+      // Shared: show stored data immediately, then live-scan once cards are in DOM
+      // Check storage for the new chat ID
+      async function initNewChat() {
+        const [summaries, seen] = await Promise.all([
+          storageGet('cas_summaries'),
+          storageGet('cas_first_seen'),
+        ]);
+        const knownNames = Object.keys(seen);
+
+        if (knownNames.length > 0) {
+          // ── Known chat: render stored data into the floating panel immediately ──
+          renderListFromStorage();
+        } else {
+          // ── Unknown chat: floating panel shows loading screen ──
+          const panel = document.getElementById(PANEL_ID);
+          if (panel) {
+            const list = document.getElementById('cas-list');
+            const status = document.getElementById('cas-status');
+            if (list) list.innerHTML = '<div style="text-align:center;padding:24px 0;color:#444;font-size:18px;letter-spacing:2px">⬡</div>';
+            if (status) status.textContent = 'Loading new chat…';
+          }
+        }
+
+        // 1. Instant pass. Captures cached DOM elements immediately on back/forward nav
+        // If DOM isn't hydrated yet (like a fresh route push), this safely does nothing.
+        const items = scanForFileList(); // Injects bar & summaries if nodes exist
+        if (document.getElementById(PANEL_ID) && items.length > 0) {
+          const list = document.getElementById('cas-list');
+          const status = document.getElementById('cas-status');
+          const dataNote = document.getElementById('cas-data-note');
+          const dataSummary = document.getElementById('cas-data-summary');
+          if (list) {
+            let finalItems = items;
+            if (activeSortMode !== 'dom-order') finalItems = scanForFileList(); // Read again so Float UI gets sorted list
+            renderList(finalItems, list, status, dataNote, dataSummary);
+          }
+        }
+        await refreshSummariseBadge();
+
+        // 2. Reactivity Observer. 
+        // Handles React hydrating the chat content milliseconds/seconds into the future.
+        watchForNewArtifacts();
+      }
+
+
+
+      initNewChat();
+    }
+
+    // Patch history methods to detect SPA navigation
+    ['pushState', 'replaceState'].forEach(fn => {
+      const orig = history[fn].bind(history);
+      history[fn] = function (...args) { orig(...args); onChatChange(); };
     });
-    initObserver.observe(document.body, { childList: true, subtree: true });
+    window.addEventListener('popstate', onChatChange);
+
+    // Fallback: observe document.title — Claude updates it on every chat switch
+    // regardless of routing mechanism (Navigation API, React Router, pushState, etc.)
+    // onChatChange guards against false-fires via the currentChatId equality check
+    const titleEl = document.querySelector('title');
+    if (titleEl) {
+      new MutationObserver(onChatChange).observe(titleEl, { subtree: true, characterData: true, childList: true });
+    } else {
+      new MutationObserver((_, obs) => {
+        const t = document.querySelector('title');
+        if (!t) return;
+        obs.disconnect();
+        new MutationObserver(onChatChange).observe(t, { subtree: true, characterData: true, childList: true });
+      }).observe(document.head || document.documentElement, { childList: true, subtree: true });
+    }
+
+    // ── Start the engine on first load ──────────────────────────────────────
+    onChatChange();
   }
 
 })();
