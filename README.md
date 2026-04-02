@@ -33,11 +33,24 @@ In most Chromium-based browsers, typing `chrome://extensions` will automatically
 
 ---
 
+## 📖 How to Use
+
+### 1. Indexing Your Chats
+To "document" a chat and its artifacts into the **Project Review** system, simply navigate to that chat. CAS will automatically scan the messages and sidebars to build its local database for that specific conversation.
+
+### 2. Live Artifact Generation
+Once you are inside a chat, CAS remains active. Any new artifacts Claude generates will be automatically detected, indexed, and added to the Sorter Panel and Sidebar in real-time.
+
+### 3. Troubleshooting & Refreshing
+If the UI becomes "stuck" or you don't see a newly generated file immediately, simply click the **↺ (Rescan)** button in the floating panel. This forcibly re-synchronizes the extension with Claude's current DOM.
+
+---
+
 ## ✨ Features
 
 ### 🖱️ Advanced Sorter Panel
 - **Tabbed Interface**: Switch between **This Chat** (current context) and **Project Review** (your entire project history).
-- **Hybrid Recognition**: CAS detects artifacts in real-time as they generate, whether the sidebar is open or closed.
+- **Hybrid Recognition**: Detects artifacts in real-time as they generate, whether the sidebar is open or closed.
 - **Quick Interactions**: 
     - **Single-Click**: Jump to and highlight the artifact (Gold Pulse highlight in chat).
     - **Double-Click**: Open the artifact content directly in the main view.
