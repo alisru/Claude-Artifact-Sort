@@ -873,12 +873,7 @@
     input.focus();
     document.execCommand('selectAll', false, null);
     document.execCommand('insertText', false, prompt);
-    if (statusTarget) statusTarget.textContent = '↓ Sending prompt — click ↓ Inject after Claude responds.';
-    
-    setTimeout(() => {
-      const sendBtn = document.querySelector('button[aria-label*="Send"], button[data-testid*="send"]');
-      if (sendBtn && !sendBtn.disabled) sendBtn.click();
-    }, 100);
+    if (statusTarget) statusTarget.textContent = '↓ Prompt ready in chat — click Send when you are satisfied.';
   }
 
   async function performInjection(statusTarget) {
@@ -1735,9 +1730,10 @@
                 buildPanel();
                 setTimeout(() => document.getElementById('cas-scan')?.click(), 50);
             });
+            // Persistent injection of ⬡ Toggle
             parent.insertBefore(btn, nativeToggle.parentElement);
-         }
-      }
+          }
+       }
 
       if (reinjecting) return;
       const hasSidebar = Array.from(document.querySelectorAll('h3')).some(h => h.textContent.trim() === 'Artifacts');
