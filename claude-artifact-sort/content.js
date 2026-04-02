@@ -31,63 +31,46 @@
     'li[class*="file"]',
   ];
 
-  // ─── Source Classification ────────────────────────────────────────────────
+  // ─── Source Classification — Artifact Identification ──────────────────────
   //
   // Confirmed from DOM inspection:
   //   UPLOADS:    data-testid="file-thumbnail"  (thumbnail cards in message flow)
-  //               name lives in h3 inside the button
   //   GENERATED:  role="button" + aria-label ending ". Open artifact."
   //               name lives in .leading-tight div inside artifact-block-cell
   //   PROJECT:    unknown — sidebar was collapsed in available DOM dump
-  //               positional fallback only until confirmed
 
-  function scanUploads() {
-    // Scope to the sidebar "Content" section — same files appear in message flow too.
-    // The sidebar Content section has an h3 with text "Content".
+  function findArtifactSidebar() {
     let container = null;
-    document.querySelectorAll('h3').forEach(h => {
-      if (h.textContent.trim() === 'Content') container = h.closest('[class*="overflow"]') || h.parentElement?.parentElement;
-    });
+    const allHeaders = document.querySelectorAll('h3');
+    for (const h of allHeaders) {
+      if (h.textContent.trim().startsWith('Artifact')) {
+        // ◈ CHAT SPACE PROTECTION:
+        // If this header is inside a message block, it's NOT the sidebar.
+        const isSecretlyAMessage = h.closest('[data-testid*="message"]') || h.closest('[class*="message"]');
+        if (isSecretlyAMessage) continue;
 
-    const scope = container || document;
-    return Array.from(scope.querySelectorAll('[data-testid="file-thumbnail"]'))
-      .filter(node => node.querySelector('button') && !node.querySelector('a[href]'))
-      .map(node => {
-        const h3 = node.querySelector('h3');
-        const typeBadge = node.querySelector('p.uppercase, p[class*="uppercase"]');
-        return {
-          node, score: 15, source: 'upload',
-          data: {
-            name: h3 ? h3.textContent.trim() : null,
-            type: typeBadge ? typeBadge.textContent.trim().toUpperCase() : null,
-            date: null, size: null, id: null,
-            allAttributes: Object.fromEntries(Array.from(node.attributes).map(a => [a.name, a.value])),
-            allDataAttributes: {},
-            rawText: h3 ? h3.textContent.trim() : '',
-            tagName: node.tagName, classes: safeClassName(node),
-          }
-        };
-      })
-      .filter(i => i.data.name);
+        // Found a potential sidebar header! Locate its list container.
+        container = h.closest('[class*="overflow"]') || h.parentElement?.parentElement;
+        if (container) break;
+      }
+    }
+    return container;
   }
 
   function scanGenerated() {
-    // Scope to the right sidebar artifacts panel only — not inline message flow.
-    // The sidebar panel has an h3 with text "Artifacts" near the top.
-    // All artifact cards sit inside div.flex.flex-col.gap-2 inside that panel.
-    let container = null;
-    document.querySelectorAll('h3').forEach(h => {
-      if (h.textContent.trim() === 'Artifacts') container = h.closest('[class*="overflow"]') || h.parentElement?.parentElement;
-    });
-
-    const scope = container || document;
-    return Array.from(scope.querySelectorAll('[role="button"][aria-label$=". Open artifact."]'))
-      .map(node => ({
+    // ◈ HYBRID RECOGNITION: Scan sidebar (modifiable) and chat flow (read-only).
+    const sidebarContainer = findArtifactSidebar();
+    const allNodes = Array.from(document.querySelectorAll('[role="button"][aria-label$=". Open artifact."]'));
+    
+    return allNodes.map(node => {
+      const isInSidebar = sidebarContainer && sidebarContainer.contains(node);
+      return {
         node,
         source: 'generated',
         data: extractNodeData(node),
-      }))
-      .filter(i => i.data.name);
+        isSidebar: isInSidebar
+      };
+    }).filter(i => i.data.name);
   }
 
   function scanUploads() {
@@ -217,7 +200,8 @@
     const summaries = await storageGet('cas_summaries');
     items.forEach(item => {
       const s = summaries[item.data.name];
-      if (s) injectSummary(item.node, s);
+      // ◈ PROTECTION: Only inject summaries into sidebar nodes
+      if (s && item.isSidebar) injectSummary(item.node, s);
     });
   }
 
@@ -226,32 +210,14 @@
 
     // We must find the TRUE side-panel container, avoiding inline chat message containers.
     // 1. Priority check: Claude's side panel has an 'Artifacts' header above the list.
+    // ◈ CHAT SPACE PROTECTION
+    // We strictly identify the Sidebar using our findArtifactSidebar() helper.
     let listContainer = null;
-    document.querySelectorAll('h3').forEach(h => {
-      if (h.textContent.trim().startsWith('Artifact')) {
-        const section = h.closest('[class*="overflow"]') || h.parentElement?.parentElement;
-        if (section) {
-          // Find the wrapper using either flex classes, or simply the parent of the first button inside the section
-          listContainer = section.querySelector('[class*="flex-col"][class*="gap-2"]') || section.querySelector('[role="button"]')?.parentElement;
-        }
-      }
-    });
-
-    // 2. Fallback: Identify the parent element holding the most artifact cards.
-    // Inline messages rarely hold as many cards as the consolidated side panel list.
-    if (!listContainer) {
-      const parentCounts = new Map();
-      items.forEach(item => {
-        const p = item.node.parentElement;
-        parentCounts.set(p, (parentCounts.get(p) || 0) + 1);
-      });
-      let maxCards = 0;
-      for (const [p, count] of parentCounts.entries()) {
-        if (count > maxCards) {
-          maxCards = count;
-          listContainer = p;
-        }
-      }
+    const section = findArtifactSidebar();
+    
+    if (section) {
+      // Find the flex/gap wrapper inside the section
+      listContainer = section.querySelector('[class*="flex-col"][class*="gap-2"]') || section.querySelector('[role="button"]')?.parentElement;
     }
 
     if (!listContainer) return;
@@ -307,7 +273,9 @@
       });
     });
 
-    listContainer.insertBefore(bar, listContainer.firstChild);
+    try {
+      listContainer.insertBefore(bar, listContainer.firstChild);
+    } catch (e) { /* sidebar was likely closed during sync */ }
   }
 
   function sidebarBtnStyle(active) {
@@ -328,20 +296,38 @@
   function scanForFileList() {
     const generated = scanGenerated();
 
-    // Deduplicate by name and node
-    const seenNames = new Set();
-    const seenNodes = new Set();
-    const all = generated.filter(i => {
-      if (!i.data.name || seenNames.has(i.data.name) || seenNodes.has(i.node)) return false;
-      seenNames.add(i.data.name);
-      seenNodes.add(i.node);
-      return true;
+    // ◈ HYBRID DEDUPLICATION:
+    // If an artifact exists in both sidebar and chat flow, we prefer the SIDEBAR node
+    // as the "master" because it's the one we can safely modify/reorder.
+    const sidebarNodesByName = new Map();
+    const chatNodesByName = new Map();
+
+    generated.forEach(i => {
+       const name = i.data.name;
+       if (i.isSidebar) sidebarNodesByName.set(name, i);
+       else chatNodesByName.set(name, i);
     });
 
-    // Assign permanent session-based original index if missing
+    const seenNames = new Set();
+    const all = [];
+
+    // Prioritize sidebar entries
+    for (const [name, item] of sidebarNodesByName.entries()) {
+       all.push(item);
+       seenNames.add(name);
+    }
+    // Add chat-only entries (e.g. freshly generated, sidebar closed)
+    for (const [name, item] of chatNodesByName.entries()) {
+       if (!seenNames.has(name)) {
+          all.push(item);
+          seenNames.add(name);
+       }
+    }
+
+    // Assign original index only to sidebar nodes
     all.forEach((item, idx) => {
       const p = item.node.parentElement;
-      if (p && !p.hasAttribute('data-cas-orig-index')) {
+      if (p && !p.hasAttribute('data-cas-orig-index') && item.isSidebar) {
         p.setAttribute('data-cas-orig-index', idx);
         item.origIndex = idx;
       }
@@ -844,6 +830,57 @@
     target.parentElement.insertBefore(el, target.nextSibling);
   }
 
+  // ─── Navigation — Jump to Chat ──────────────────────────────────────────
+
+  function jumpToArtifact(name) {
+    if (!name) return;
+    
+    // Find all potential artifact cards in the chat flow
+    // We look for the same aria-label markers
+    const targets = Array.from(document.querySelectorAll('[role="button"][aria-label*="' + name + '"]'))
+      .filter(n => {
+        // Exclude sidebar nodes
+        let isSidebar = false;
+        let p = n;
+        while (p && p !== document.body) {
+           if (p.textContent.trim().startsWith('Artifacts') && (p.tagName === 'H3' || p.querySelector('h3'))) {
+              isSidebar = true;
+              break;
+           }
+           p = p.parentElement;
+        }
+        return !isSidebar;
+      });
+
+    if (targets.length === 0) {
+       console.warn('[CAS] Destination artifact not found in chat history:', name);
+       return;
+    }
+
+    // Scroll to the LAST one (most recent)
+    const target = targets[targets.length - 1];
+    
+    // Scroll container
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+    // Flash Highlight
+    const originalBg = target.style.background;
+    const originalBorder = target.style.borderColor;
+    const originalTransition = target.style.transition;
+
+    target.style.transition = 'background 0.3s, border-color 0.3s';
+    target.style.background = 'rgba(240, 192, 64, 0.2)';
+    target.style.borderColor = 'rgba(240, 192, 64, 0.6)';
+
+    setTimeout(() => {
+       target.style.background = originalBg;
+       target.style.borderColor = originalBorder;
+       setTimeout(() => {
+          target.style.transition = originalTransition;
+       }, 500);
+    }, 2000);
+  }
+
   async function injectAndStore(node, name, text) {
     injectSummary(node, text);
     await storeSummary(name, text);
@@ -851,9 +888,19 @@
 
   async function performSummarise(statusTarget) {
     const freshItems = scanForFileList();
-    const artifacts = freshItems.filter(i => i.source === 'generated');
+    const summaries = await storageGet('cas_summaries');
+    
+    // Filter to only new/unsummarised artifacts and deduplicate by name
+    const seenNames = new Set();
+    const artifacts = freshItems.filter(i => {
+      if (i.source !== 'generated' || !i.data.name || summaries[i.data.name]) return false;
+      if (seenNames.has(i.data.name)) return false;
+      seenNames.add(i.data.name);
+      return true;
+    });
+
     if (artifacts.length === 0) {
-      if (statusTarget) statusTarget.textContent = 'Scan first (↺).';
+      if (statusTarget) statusTarget.textContent = 'Everything is summarised.';
       return;
     }
     const lenSelect = document.getElementById('cas-sum-length');
@@ -919,6 +966,8 @@
       }
 
       for (const [idx, artifact] of artifacts.entries()) {
+        if (!artifact.isSidebar) continue; // ◈ PROTECTION: Skip chat flow nodes
+        
         if (Array.isArray(parsed)) {
           if (parsed[idx]) {
             await injectAndStore(artifact.node, artifact.data.name, parsed[idx]);
@@ -1023,7 +1072,7 @@
           <span style="flex:1;font-size:10px;color:#f5f5f5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${meta.name}">${meta.name}</span>
           <span style="font-size:9px;color:#aaa;flex-shrink:0">${meta.artifactCount || 0} ⬡</span>
           <span style="font-size:9px;color:#888;flex-shrink:0">${meta.lastSeen || ''}</span>
-          <a href="https://claude.ai/chat/${chatId}" target="_blank" rel="noopener" title="Open in new tab" style="color:#aaa;font-size:11px;flex-shrink:0;text-decoration:none;padding:0 2px;line-height:1" onclick="event.stopPropagation()">↗</a>
+          <a href="https://claude.ai/chat/${chatId}" target="_blank" rel="noopener" title="Open in new tab" style="color:#fff;font-size:11px;flex-shrink:0;text-decoration:none;padding:0 2px;line-height:1" onclick="event.stopPropagation()">↗</a>
           ${expandIcon}
         `;
 
@@ -1134,21 +1183,46 @@
           row.className = 'cas-row';
           row.style.flexDirection = 'column';
           row.style.alignItems = 'flex-start';
+          row.style.position = 'relative';
+
           const badge = data.type
             ? `<span class="cas-badge cas-type-${data.type.toLowerCase()}">${data.type}</span>`
             : '<span class="cas-badge cas-type-unknown">?</span>';
           const ts = seen[data.name] || '';
           const summary = summaries[data.name] || '';
+          
+          // ◈ NAVIGATION UI
+          // Sidebar nodes highlight the sidebar. 
+          // All nodes (sidebar or chat) get a "Jump" button to scroll to the chat flow.
           row.innerHTML = `
             <div style="display:flex;align-items:center;gap:5px;width:100%">
               <span class="cas-index">${i + 1}</span>
               ${badge}
-              <span class="cas-name" title="${data.name || ''}">${(data.name || 'unknown').slice(0, 28)}</span>
+              <span class="cas-name" title="Double-click to open • Single-click to find\n${data.name || ''}" style="flex:1; cursor:pointer;">${(data.name || 'unknown').slice(0, 24)}</span>
               ${ts ? `<span class="cas-meta">${ts}</span>` : ''}
+              <button class="cas-jump-btn" title="Jump to point in chat" style="background:none;border:none;color:#fff;cursor:pointer;font-size:12px;padding:0 4px;margin-left:auto;transition:color 0.2s;text-shadow:0 0 2px rgba(255,255,255,0.3)">⟢</button>
             </div>
             ${summary ? `<div style="font-size:9px;color:#666;padding:2px 0 0 20px;line-height:1.3">${summary}</div>` : ''}
           `;
-          row.addEventListener('click', () => highlightNode(item.node));
+
+          // Single click: highlights and scrolls
+          row.addEventListener('click', (e) => {
+             if (e.target.closest('.cas-jump-btn')) return;
+             highlightNode(item.node, item.isSidebar ? 'sidebar' : 'chat');
+          });
+
+          // Double click: Opens the artifact in the sidebar
+          row.addEventListener('dblclick', (e) => {
+             if (e.target.closest('.cas-jump-btn')) return;
+             if (item.node) item.node.click();
+          });
+
+          // Clicking the Jump button specifically scrolls to chat flow
+          row.querySelector('.cas-jump-btn').addEventListener('click', (e) => {
+             e.stopPropagation();
+             jumpToArtifact(data.name);
+          });
+
           list.appendChild(row);
         });
       }
@@ -1156,16 +1230,24 @@
     });
   }
 
-  function highlightNode(node) {
+  function highlightNode(node, context = 'sidebar') {
+    if (!node) return;
     // Scroll node into view and flash it
     node.scrollIntoView({ behavior: 'smooth', block: 'center' });
     const prev = node.style.outline;
     const prevBg = node.style.backgroundColor;
+    const prevTransition = node.style.transition;
+
+    node.style.transition = 'background 0.3s, outline 0.3s';
     node.style.outline = '2px solid #f0c040';
-    node.style.backgroundColor = 'rgba(240,192,64,0.18)';
+    node.style.backgroundColor = context === 'sidebar' ? 'rgba(240,192,64,0.18)' : 'rgba(240,192,64,0.1)';
+    
     setTimeout(() => {
       node.style.outline = prev;
       node.style.backgroundColor = prevBg;
+      setTimeout(() => {
+        node.style.transition = prevTransition;
+      }, 500);
     }, 1800);
   }
 
@@ -1630,16 +1712,13 @@
     const container = document.body;
 
     const obs = new MutationObserver((mutations) => {
-      // Ignore mutations if they are exclusively our own UI elements (e.g. summary badges)
+      // Ignore mutations if they are exclusively our own UI elements
       const isOnlyUs = mutations.every(m => {
-        if (m.target?.id === 'cas-sidebar-bar' || m.target?.id === PANEL_ID) return true;
-        if (m.target?.classList?.contains('cas-summary-badge')) return true;
+        if (m.target?.id === 'cas-sidebar-bar' || m.target?.id === PANEL_ID || m.target?.id === 'cas-panel-toggle') return true;
+        if (m.target?.classList?.contains('cas-summary-badge') || m.target?.classList?.contains('cas-injected-summary')) return true;
         let onlyOurNodes = true;
         m.addedNodes.forEach(n => {
-          if (n.nodeType === 1 && !(n.id === 'cas-sidebar-bar' || n.id === PANEL_ID || n.classList?.contains('cas-summary-badge'))) onlyOurNodes = false;
-        });
-        m.removedNodes.forEach(n => {
-          if (n.nodeType === 1 && !(n.id === 'cas-sidebar-bar' || n.id === PANEL_ID || n.classList?.contains('cas-summary-badge'))) onlyOurNodes = false;
+          if (n.nodeType === 1 && !(n.id === 'cas-sidebar-bar' || n.id === PANEL_ID || n.id === 'cas-panel-toggle' || n.classList?.contains('cas-summary-badge') || n.classList?.contains('cas-injected-summary'))) onlyOurNodes = false;
         });
         return (m.addedNodes.length > 0 || m.removedNodes.length > 0) ? onlyOurNodes : false;
       });
@@ -1652,6 +1731,7 @@
         const firstSeen = await storageGet('cas_first_seen');
         let changed = false;
 
+        // Update First Seen timestamps
         generated.forEach(item => {
           const name = item.data.name;
           if (!name || knownNames.has(name)) return;
@@ -1661,10 +1741,25 @@
             const now = new Date();
             firstSeen[name] = `${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')} ${now.getDate().toString().padStart(2,'0')}.${(now.getMonth()+1).toString().padStart(2,'0')}`;
             changed = true;
+            console.log('[CAS] New artifact detected:', name);
           }
         });
 
-        if (changed) await storageSet('cas_first_seen', firstSeen);
+        if (changed) {
+           await storageSet('cas_first_seen', firstSeen);
+           // Visual cue on the toggle button if it exists
+           const toggle = document.querySelector('.cas-global-toggle-btn');
+           if (toggle) {
+              toggle.style.borderColor = '#f0c040';
+              toggle.style.color = '#f0c040';
+              toggle.style.boxShadow = '0 0 8px rgba(240,192,64,0.4)';
+              setTimeout(() => {
+                 toggle.style.borderColor = '#444';
+                 toggle.style.color = '#888';
+                 toggle.style.boxShadow = 'none';
+              }, 3000);
+           }
+        }
 
         // Check if the physical artifact nodes have actually changed or appeared
         let layoutChanged = generated.length !== lastArtifactNodes.size;
@@ -1676,38 +1771,23 @@
           }
         }
 
-        // If nothing mathematically changed with the artifacts, and our bar is safely injected, 
-        // silently abort. No flickering, no CPU burn.
-        if (!layoutChanged && document.getElementById('cas-sidebar-bar')) {
-            obs.takeRecords();
-            return; 
-        }
-        
-        lastArtifactNodes = new Set(generated.map(g => g.node));
-
-        reinjecting = true;
-        const items = scanForFileList(); // Injects into Claude DOM synchronously
-        
-        // Auto-refresh the floating UI panel
+        // Auto-refresh the floating UI panel if open
         if (document.getElementById(PANEL_ID)) {
           const list = document.getElementById('cas-list');
           const status = document.getElementById('cas-status');
           const dataNote = document.getElementById('cas-data-note');
           const dataSummary = document.getElementById('cas-data-summary');
-          if (list && items.length > 0) {
-            let finalItems = items;
-            if (activeSortMode !== 'dom-order') finalItems = scanForFileList(); 
-            renderList(finalItems, list, status, dataNote, dataSummary);
+          if (list && layoutChanged) {
+            console.log('[CAS] Layout changed; refreshing panel list...');
+            const items = scanForFileList(); 
+            renderList(items, list, status, dataNote, dataSummary);
           }
         }
         
-        // Clear all mutations caused by our synchronous reordering/injecting
+        lastArtifactNodes = new Set(generated.map(g => g.node));
         obs.takeRecords();
         reinjecting = false;
-
-        // Fire the asynchronous badge fetches (their DOM mutations are filtered out by isOnlyUs above safely!)
         refreshSummariseBadge();
-
       }, 500);
     });
 
@@ -1717,32 +1797,54 @@
     // Sometimes React hydrates the DOM *after* the initial mutation event, causing the observer to miss it.
     const pollInterval = setInterval(() => {
       // 1. Inject Floating Panel Toggle Button next to native Claude controls
-      const nativeToggle = document.querySelector('[data-testid="wiggle-controls-actions-toggle"]');
+      // [data-testid="wiggle-controls-actions-toggle"] exists in the header area.
+      // We also look for the sidebar toggle or the "New Chat" area if that fails.
+      const nativeToggle = document.querySelector('[data-testid="wiggle-controls-actions-toggle"]')
+                        || document.querySelector('[aria-label="Side menu"]') 
+                        || document.querySelector('button[class*="sidebar-toggle"]');
+      
       if (nativeToggle && !document.getElementById('cas-panel-toggle')) {
-         const parent = nativeToggle.parentElement?.parentElement;
-         if (parent && parent.tagName !== 'BODY') {
+         // Find a good anchor point in the top-right controls area
+         const anchor = nativeToggle.closest('div.flex') || nativeToggle.parentElement;
+         if (anchor && anchor.tagName !== 'BODY') {
             const btn = document.createElement('div');
             btn.id = 'cas-panel-toggle';
-            btn.className = 'w-fit';
-            btn.innerHTML = `<button class="inline-flex items-center justify-center relative isolate shrink-0 can-focus select-none transition duration-300 ease-[cubic-bezier(0.165,0.85,0.45,1)] h-8 w-8 rounded-md !bg-bg-400" type="button" aria-label="Open Sorter Panel" title="Open Sorter Panel" style="color:#888; border:1px solid #444; margin-right:4px;">⬡</button>`;
+            btn.style.cssText = 'display:inline-flex; align-items:center; vertical-align:middle;';
+            btn.innerHTML = `
+              <button class="cas-global-toggle-btn inline-flex items-center justify-center relative isolate shrink-0 can-focus select-none transition duration-300 ease-[cubic-bezier(0.165,0.85,0.45,1)] h-8 w-8 rounded-md !bg-bg-400" 
+                      type="button" 
+                      aria-label="Open Sorter Panel" 
+                      title="Open Sorter Panel" 
+                      style="color:#888; border:1px solid #444; margin-right:4px;">
+                ⬡
+              </button>
+            `;
             
             btn.querySelector('button').addEventListener('click', () => {
                 buildPanel();
-                setTimeout(() => document.getElementById('cas-scan')?.click(), 50);
+                setTimeout(() => {
+                   const scanBtn = document.getElementById('cas-scan');
+                   if (scanBtn) scanBtn.click();
+                }, 100);
             });
-            // Persistent injection of ⬡ Toggle
-            parent.insertBefore(btn, nativeToggle.parentElement);
+            // ◈ PERSISTENT TOGGLE INJECTION
+            // Restored to the user's preferred "perfectly fine" positioning
+            try {
+              const parent = nativeToggle.parentElement?.parentElement;
+              if (parent && parent.tagName !== 'BODY') {
+                 parent.insertBefore(btn, nativeToggle.parentElement);
+              }
+            } catch (err) { /* retry next interval */ }
           }
        }
 
       if (reinjecting) return;
-      const hasSidebar = Array.from(document.querySelectorAll('h3')).some(h => h.textContent.trim() === 'Artifacts');
+      const sidebar = findArtifactSidebar();
       
       // If the sidebar is visibly in the DOM, but our sort bar is entirely missing:
-      if (hasSidebar && !document.getElementById('cas-sidebar-bar')) {
+      if (sidebar && !document.getElementById('cas-sidebar-bar')) {
         reinjecting = true;
         scanForFileList(); // Forcibly re-inject it!
-        // We use takeRecords and sync injection here because we don't have event context
         obs.takeRecords();
         reinjecting = false;
       }
@@ -1762,9 +1864,17 @@
     const generated = scanGenerated();
     
     // Only artifacts that are generated, have a name, and don't have a stored summary yet
-    const unsummarised = generated.filter(i => 
+    const unsummarisedRaw = generated.filter(i => 
       i.source === 'generated' && i.data.name && !stored[i.data.name]
     );
+
+    // Deduplicate by name to prevent doubling (as artifacts may appear in both sidebar and chat)
+    const seenNames = new Set();
+    const unsummarised = unsummarisedRaw.filter(i => {
+      if (seenNames.has(i.data.name)) return false;
+      seenNames.add(i.data.name);
+      return true;
+    });
 
     const summaryRow = document.getElementById('cas-summary-row');
     if (summaryRow) {
@@ -1831,10 +1941,16 @@
   // GAP 3: fills input WITHOUT auto-sending — user reviews before hitting send
   // GAP 4: badge transitions to "↓ Inject" state instead of disappearing
   // GAP 6: respects length selector if panel is open
-  function sendSummaryPromptToChat(items, badge) {
+  async function sendSummaryPromptToChat(items, badge) {
+    const summaries = await storageGet('cas_summaries');
+    
+    // Safety check: ensure we are only asking for items that still need summaries
+    const unsummarisedItems = items.filter(a => !summaries[a.data.name]);
+    if (unsummarisedItems.length === 0) return;
+
     const sentences = document.getElementById('cas-sum-length')?.value || '1';
     const lenLabel = sentences === '1' ? '1 sentence' : sentences === '2' ? '2-3 sentences' : '5 sentences';
-    const names = items.map(a => a.data.name).join('\n');
+    const names = unsummarisedItems.map(a => a.data.name).join('\n');
     const prompt = `For each file below write exactly ${lenLabel} describing what it contains.\nReply with a JSON object only — keys are the exact filenames, values are the summaries. No other text.\n\n${names}`;
 
     // Find ProseMirror input
