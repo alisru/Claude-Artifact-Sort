@@ -616,7 +616,6 @@
     // Trigger scan and first seen population
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        scanForFileList();
         renderChatSummaries();
         refreshSummariseBadge();
       });
@@ -647,16 +646,20 @@
             <span id="cas-flyout-sum-status" style="font-size:9px;color:#888;display:none;"></span>
           </div>
 
-          <div style="display:flex;gap:10px;align-items:center;margin-bottom:12px;">
-            <div style="display:flex;flex-direction:column;gap:4px;">
-              <label style="font-size:8px;color:#555;text-transform:uppercase;">Topics</label>
-              <select id="cas-flyout-topic-lines" class="cas-mini-select"><option value="1">1</option><option value="2" selected>2</option><option value="5">5</option></select>
+          <div style="display:flex; flex-direction:column; gap:12px; margin-bottom:16px;">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+              <div style="display:flex; gap:10px;">
+                <div style="display:flex;flex-direction:column;gap:3px;">
+                  <label style="font-size:8px;color:#555;text-transform:uppercase;letter-spacing:0.08em;font-weight:600;">Topics</label>
+                  <select id="cas-flyout-topic-lines" class="cas-mini-select" style="min-width:50px;"><option value="1">1</option><option value="2" selected>2</option><option value="5">5</option></select>
+                </div>
+                <div style="display:flex;flex-direction:column;gap:3px;">
+                  <label style="font-size:8px;color:#555;text-transform:uppercase;letter-spacing:0.08em;font-weight:600;">Aspects</label>
+                  <select id="cas-flyout-aspect-lines" class="cas-mini-select" style="min-width:50px;"><option value="1" selected>1</option><option value="2">2</option><option value="5">5</option></select>
+                </div>
+              </div>
+              <button id="cas-flyout-sum-copy" class="cas-premium-btn" style="height:26px; padding:0 10px; font-size:9px;">⎘ COPY PROMPT</button>
             </div>
-            <div style="display:flex;flex-direction:column;gap:4px;">
-              <label style="font-size:8px;color:#555;text-transform:uppercase;">Aspects</label>
-              <select id="cas-flyout-aspect-lines" class="cas-mini-select"><option value="1" selected>1</option><option value="2">2</option><option value="5">5</option></select>
-            </div>
-            <button id="cas-flyout-sum-copy" style="margin-top:14px;flex:1;background:#13161b;border:1px solid #2a2e36;color:#ccc;border-radius:3px;padding:5px;cursor:pointer;font-family:monospace;font-size:9px;">⎘ Copy Prompt</button>
           </div>
 
           <div id="cas-flyout-action-row" style="display:flex;gap:8px;align-items:center;margin-bottom:16px;">
@@ -787,9 +790,9 @@
       e.stopPropagation();
       const panel = document.getElementById('cas-flyout-options');
       if (panel) {
-        const isVisible = panel.style.display === 'flex';
-        panel.style.display = isVisible ? 'none' : 'flex';
-        document.getElementById('cas-flyout-toggle-options').style.color = isVisible ? '#888' : 'hsl(var(--cas-gold))';
+        const isVisible = panel.style.display !== 'none';
+        panel.style.display = isVisible ? 'none' : 'block';
+        document.getElementById('cas-flyout-toggle-options').style.color = isVisible ? '#888' : '#f0c040';
         document.getElementById('cas-flyout-toggle-options').style.background = isVisible ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.08)';
         if (!isVisible) refreshFlyoutChatSelector();
       }
@@ -798,7 +801,7 @@
     document.addEventListener('click', (e) => {
       const panel = document.getElementById('cas-flyout-options');
       const toggle = document.getElementById('cas-flyout-toggle-options');
-      if (panel && panel.style.display === 'flex' && !panel.contains(e.target) && !toggle.contains(e.target)) {
+      if (panel && panel.style.display === 'block' && !panel.contains(e.target) && !toggle.contains(e.target)) {
         panel.style.display = 'none';
         toggle.style.color = '#888';
         toggle.style.background = 'rgba(255,255,255,0.03)';
@@ -820,17 +823,6 @@
       renderChatSummaries(e.target.value.toLowerCase());
     });
 
-    const buildFlyoutPrompt = () => {
-      const t = document.getElementById('cas-flyout-topic-lines')?.value || '2';
-      const a = document.getElementById('cas-flyout-aspect-lines')?.value || '1';
-      return `Identify the main topics discussed in this entire chat. ` +
-        `Focus on the human dialogue, decisions made, and conceptual evolution. ` +
-        `DO NOT provide technical summaries of the code or artifacts themselves (the sorter modal handles that). ` +
-        `Write exactly ${t} line(s) summarising each topic and exactly ${a} line(s) for each key aspect.\n\n` +
-        `Reply ONLY with a JSON object using this exact shape — no other text:\n` +
-        `{ "topics": [{ "name": "...", "summary": "...", "aspects": [{"name":"...","summary":"..."}] }] }`;
-    };
-
     document.getElementById('cas-flyout-sum-copy')?.addEventListener('click', () => {
       navigator.clipboard.writeText(buildFlyoutPrompt()).then(() => {
         const s = document.getElementById('cas-flyout-sum-status');
@@ -839,9 +831,7 @@
     });
 
     document.getElementById('cas-flyout-summarise')?.addEventListener('click', () => {
-      const filled = fillInput(buildFlyoutPrompt());
-      const s = document.getElementById('cas-flyout-sum-status');
-      if (s) { s.textContent = filled ? '✓ Prompt injected' : '✗ Input not found'; s.style.display = 'block'; }
+      performChatSummarise(document.getElementById('cas-flyout-sum-status'));
     });
 
     document.getElementById('cas-flyout-inject')?.addEventListener('click', async () => {
@@ -995,24 +985,28 @@
         <!-- ── Chat Summary ──────────────────────────────────────── -->
         <details id="cas-chat-summary-row" class="cas-section-details">
           <summary class="cas-section-label cas-animated-arrow">Chat Summary</summary>
-          <div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap;margin-top:6px;">
-            <label style="font-size:9px;color:#888">Topics</label>
-            <select id="cas-chat-topic-lines">
-              <option value="1">1 line</option>
-              <option value="2">2 lines</option>
-              <option value="5">5 lines</option>
-            </select>
-            <label style="font-size:9px;color:#888">Aspects</label>
-            <select id="cas-chat-aspect-lines">
-              <option value="1">1 line</option>
-              <option value="2">2 lines</option>
-              <option value="5">5 lines</option>
-            </select>
+          <div style="display:flex; align-items:flex-end; gap:10px; margin-top:8px; padding-bottom:10px; border-bottom:1px solid rgba(255,255,255,0.05);">
+            <div style="display:flex;flex-direction:column;gap:3px;">
+              <label style="font-size:8px;color:#555;text-transform:uppercase;letter-spacing:0.08em;font-weight:600;">Topics</label>
+              <select id="cas-chat-topic-lines" class="cas-mini-select" style="min-width:60px;">
+                <option value="1">1 line</option>
+                <option value="2" selected>2 lines</option>
+                <option value="5">5 lines</option>
+              </select>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:3px;">
+              <label style="font-size:8px;color:#555;text-transform:uppercase;letter-spacing:0.08em;font-weight:600;">Aspects</label>
+              <select id="cas-chat-aspect-lines" class="cas-mini-select" style="min-width:60px;">
+                <option value="1" selected>1 line</option>
+                <option value="2">2 lines</option>
+                <option value="5">5 lines</option>
+              </select>
+            </div>
+            <button id="cas-chat-sum-copy" class="cas-premium-btn" style="height:24px; margin-left:auto;">⎘ COPY PROMPT</button>
           </div>
-          <div style="display:flex;gap:5px;align-items:center;margin-top:5px">
-            <button id="cas-chat-sum-copy" class="cas-premium-btn">⎘ COPY PROMPT</button>
-            <button id="cas-chat-summarise" class="cas-premium-btn" style="background:hsl(var(--cas-gold)); color:#0d0f12; border:none; font-weight:600;">↓ SUMMARISE CHAT</button>
-            <button id="cas-chat-inject" class="cas-premium-btn">↓ INJECT</button>
+          <div style="display:flex;gap:5px;align-items:center;margin-top:10px">
+            <button id="cas-chat-summarise" class="cas-premium-btn" style="flex:1; background:hsl(var(--cas-gold)); color:#0d0f12; border:none; font-weight:600;">↓ SUMMARISE CHAT</button>
+            <button id="cas-chat-inject" class="cas-premium-btn" style="flex:1;">↓ INJECT</button>
           </div>
           <div id="cas-chat-sum-status" style="font-size:9px;color:#888;margin-top:3px; margin-bottom:3px; display:none"></div>
           <div id="cas-current-chat-summary" style="display:none;margin-top:8px;"></div>
@@ -1339,28 +1333,7 @@
 
     // ── Chat Summary handlers ─────────────────────────────────────────────
 
-    function buildChatSummaryPrompt() {
-      const topicLines = document.getElementById('cas-chat-topic-lines')?.value || '1';
-      const aspectLines = document.getElementById('cas-chat-aspect-lines')?.value || '1';
-      return `Analyse this conversation and identify all distinct topics discussed.\n` +
-        `Focus on the human dialogue, decisions made, and conceptual evolution. ` +
-        `DO NOT provide technical summaries of the code or artifacts themselves. ` +
-        `For each topic write exactly ${topicLines} line(s) summarising it.\n` +
-        `For each distinct aspect or subtopic within each topic write exactly ${aspectLines} line(s).\n\n` +
-        `Reply ONLY with a JSON object in this exact shape — no other text:\n` +
-        `{\n  "topics": [\n    {\n      "name": "Topic name",\n      "summary": "Summary of topic.",\n` +
-        `      "aspects": [\n        { "name": "Aspect name", "summary": "Summary of aspect." }\n      ]\n    }\n  ]\n}`;
-    }
-
-    function fillInput(text) {
-      const input = document.querySelector('[contenteditable="true"][data-testid="composer-input"], .ProseMirror[contenteditable="true"]')
-        || document.querySelector('[contenteditable="true"]');
-      if (!input) return false;
-      input.focus();
-      document.execCommand('selectAll', false, null);
-      document.execCommand('insertText', false, text);
-      return true;
-    }
+    function buildChatSummaryPrompt() { return buildFlyoutPrompt(); }
 
     document.getElementById('cas-chat-sum-copy')?.addEventListener('click', () => {
       navigator.clipboard.writeText(buildChatSummaryPrompt()).then(() => {
@@ -1545,13 +1518,8 @@
   async function performSummarise(statusTarget) {
     const freshItems = scanForFileList();
     const summaries = await storageGet('cas_summaries');
-
-    // Filter to only new/unsummarised artifacts and deduplicate by name
-    const seenNames = new Set();
     const artifacts = freshItems.filter(i => {
       if (i.source !== 'generated' || !i.data.name || summaries[i.data.name]) return false;
-      if (seenNames.has(i.data.name)) return false;
-      seenNames.add(i.data.name);
       return true;
     });
 
@@ -1565,18 +1533,45 @@
     const names = artifacts.map(a => a.data.name).join('\n');
     const prompt = `For each file below write exactly ${lenLabel} describing what it contains.\nReply with a JSON object only — keys are the exact filenames, values are the summaries. No other text.\n\n${names}`;
 
+    const filled = fillInput(prompt);
+    if (statusTarget) {
+      statusTarget.textContent = filled ? '✓ Artifact Prompt injected — send in chat, then click ↓ INJECT' : '✗ Input not found';
+    }
+  }
+
+  function fillInput(text) {
     const input = document.querySelector('[contenteditable="true"][data-testid="composer-input"], .ProseMirror[contenteditable="true"]')
       || document.querySelector('[contenteditable="true"]');
-
-    if (!input) {
-      if (statusTarget) statusTarget.textContent = 'Chat input not found.';
-      return;
-    }
-
+    if (!input) return false;
     input.focus();
     document.execCommand('selectAll', false, null);
-    document.execCommand('insertText', false, prompt);
-    if (statusTarget) statusTarget.textContent = '↓ Prompt ready in chat — click Send when you are satisfied.';
+    document.execCommand('insertText', false, text);
+    return true;
+  }
+
+  function buildFlyoutPrompt() {
+    const t = document.getElementById('cas-flyout-topic-lines')?.value
+           || document.getElementById('cas-chat-topic-lines')?.value
+           || '2';
+    const a = document.getElementById('cas-flyout-aspect-lines')?.value
+           || document.getElementById('cas-chat-aspect-lines')?.value
+           || '1';
+    return `Analyse this conversation and identify all distinct topics discussed.\n` +
+      `Focus on the human dialogue, decisions made, and conceptual evolution. ` +
+      `DO NOT provide technical summaries of the code or artifacts themselves. ` +
+      `For each topic write exactly ${t} line(s) summarising it.\n` +
+      `For each distinct aspect or subtopic within each topic write exactly ${a} line(s).\n\n` +
+      `Reply ONLY with a JSON object in this exact shape — no other text:\n` +
+      `{\n  "topics": [\n    {\n      "name": "Topic name",\n      "summary": "Summary of topic.",\n` +
+      `      "aspects": [\n        { "name": "Aspect name", "summary": "Summary of aspect." }\n      ]\n    }\n  ]\n}`;
+  }
+
+  function performChatSummarise(statusTarget) {
+    const filled = fillInput(buildFlyoutPrompt());
+    if (statusTarget) {
+      statusTarget.textContent = filled ? '✓ Chat Prompt injected — send in chat, then click ↓ INJECT' : '✗ Input not found';
+      statusTarget.style.display = 'block';
+    }
   }
 
   async function performInjection(statusTarget) {
@@ -1960,7 +1955,7 @@
       } else {
         if (flyoutRefocusBtn) flyoutRefocusBtn.style.display = 'none';
         // Hide action row if summary already exists for the current chat, as requested
-        if (flyoutActionRow) flyoutActionRow.style.display = summaryExists ? 'none' : 'flex';
+        if (flyoutActionRow) flyoutActionRow.style.display = 'flex';
       }
     }
   }
@@ -2119,9 +2114,9 @@
         position: fixed;
         right: 20px;
         top: 60px;
-        width: 400px;
+        width: 440px;
         height: auto;
-        min-width: 250px;
+        min-width: 350px;
         min-height: 100px;
         z-index: 1000000;
         background: hsla(var(--cas-bg-raw), 0.98);
@@ -2805,15 +2800,14 @@
   }
 
   async function refreshSummariseBadge() {
+    injectStyles();
     const stored = await storageGet('cas_summaries');
     const generated = scanGenerated();
 
-    // Only artifacts that are generated, have a name, and don't have a stored summary yet
     const unsummarisedRaw = generated.filter(i =>
       i.source === 'generated' && i.data.name && !stored[i.data.name]
     );
 
-    // Deduplicate by name to prevent doubling (as artifacts may appear in both sidebar and chat)
     const seenNames = new Set();
     const unsummarised = unsummarisedRaw.filter(i => {
       if (seenNames.has(i.data.name)) return false;
@@ -2823,7 +2817,8 @@
 
     const summaryRow = document.getElementById('cas-summary-row');
     if (summaryRow) {
-      summaryRow.style.display = unsummarised.length > 0 ? 'block' : 'none';
+      // Restore lifecycle: hide if no artifacts (or keep always visible if they insist on the modal but let's stick to simple first)
+      summaryRow.style.display = 'block'; 
     }
 
     const bar = document.getElementById('cas-sidebar-bar');
@@ -2831,7 +2826,7 @@
 
     let toolbar = document.getElementById('cas-sidebar-toolbar');
 
-    // If no new items, remove the toolbar
+    // Restoration: If no new items, remove the toolbar (auto-hide)
     if (unsummarised.length === 0) {
       if (toolbar) toolbar.remove();
       return;
@@ -2840,46 +2835,29 @@
     if (!toolbar) {
       toolbar = document.createElement('div');
       toolbar.id = 'cas-sidebar-toolbar';
-      toolbar.style.cssText = [
-        'display:flex', 'gap:4px', 'align-items:center', 'margin-left:auto',
-      ].join(';');
+      toolbar.style.cssText = 'display:flex;gap:4px;align-items:center;margin-left:auto;';
 
       const sBtn = document.createElement('button');
-      sBtn.textContent = '⬡ SUMMARISE';
-      sBtn.title = `Generate prompt for ${unsummarised.length} new artifacts`;
-      sBtn.style.cssText = [
-        'background:#f0c040', 'border:none', 'color:#0d0f12',
-        'padding:2px 7px', 'border-radius:3px', 'font-family:monospace',
-        'font-size:9px', 'font-weight:600', 'cursor:pointer',
-      ].join(';');
-      sBtn.onclick = (e) => {
-        e.stopPropagation();
-        performSummarise();
-      };
+      sBtn.id = 'cas-sidebar-sum-art';
+      sBtn.className = 'cas-premium-btn';
+      sBtn.style.cssText = 'padding:2px 7px; background:hsl(var(--cas-gold)); color:#0d0f12; border:none;';
+      sBtn.onclick = (e) => { e.stopPropagation(); performSummarise(); };
 
       const iBtn = document.createElement('button');
       iBtn.textContent = '↓ INJECT';
-      iBtn.title = 'Inject parsed AI response';
-      iBtn.style.cssText = [
-        'background:#2a2e36', 'border:1px solid #444', 'color:#ccc',
-        'padding:2px 7px', 'border-radius:3px', 'font-family:monospace',
-        'font-size:9px', 'font-weight:600', 'cursor:pointer',
-      ].join(';');
-      iBtn.onclick = (e) => {
-        e.stopPropagation();
-        performInjection();
-      };
+      iBtn.className = 'cas-premium-btn';
+      iBtn.style.cssText = 'padding:2px 7px;';
+      iBtn.onclick = (e) => { e.stopPropagation(); performInjection(); };
 
       toolbar.appendChild(sBtn);
       toolbar.appendChild(iBtn);
       bar.appendChild(toolbar);
-    } else {
-      // Update counts if already there
-      const sBtn = toolbar.querySelector('button:first-child');
-      if (sBtn) {
-        sBtn.textContent = `⬡ SUMMARISE (${unsummarised.length})`;
-        sBtn.title = `Generate prompt for ${unsummarised.length} new artifacts`;
-      }
+    }
+
+    const sBtn = document.getElementById('cas-sidebar-sum-art');
+    if (sBtn) {
+      sBtn.textContent = `⬡ SUMMARISE (${unsummarised.length})`;
+      sBtn.title = `Generate prompt for ${unsummarised.length} new artifacts`;
     }
   }
 
