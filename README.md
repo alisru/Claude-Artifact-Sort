@@ -56,6 +56,7 @@ If the UI becomes "stuck" or you don't see a newly generated file immediately, s
     - **Double-Click**: Open the artifact content directly in the main view.
 - **Multidimensional Sorting**: Sort by Filename (A-Z/Z-A), File Size, File Type, or "First Seen" Timestamp.
 
+
 ### 📂 Project-Wide Browser
 - **Persistent Index**: CAS archives every chat it scans within a project (via UUID extraction).
 - **Archive Stats**: View artifact counts, last-seen timestamps, and chat names for everything you've worked on in one view.
@@ -71,12 +72,21 @@ If the UI becomes "stuck" or you don't see a newly generated file immediately, s
 - **Immutable Chat Flow**: CAS is strictly non-intrusive. It **never** injects structural DOM elements into the main chat flow, protecting your exports and screenshots from clutter.
 - **Sidebar Scoping**: Sorting controls and summary badges are strictly scoped to the Artifacts Sidebar.
 
+## Change.log
+- **Artifact Chat Summary Search**: Search your artifact list and summaries for hits
+- **Non-project sort support**: Added non-project support, whoops
+- **Chat-Summaries**: Summarise your chats and inject them into the sort panel
+- *Something else I probably forgot: I'm sure there was something else and there usually is*
+
+# I Should Probably;
+- Add the timestamps into the sidebar
 ---
 
 ## 🛠️ Usage Tips
 - **The Gold Pulse**: The `⬡` toggle button in the header will pulse gold when a new artifact is caught by the background scanner.
 - **JSON Formatting**: When summarising, Claude provides a JSON object which CAS automatically parses and maps back to your files.
 - **Manual Scan**: Click **↺** in the Sorter Panel or Sidebar to force a full re-index of the current view.
+<img width="1131" height="856" alt="Screenshot 2026-04-10 042853" src="https://github.com/user-attachments/assets/e9045b24-c03b-4c65-b997-bb51328da9f4" />
 
 ---
 
